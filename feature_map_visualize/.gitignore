@@ -1,0 +1,32 @@
+*.pth
+# 忽略所有 .log 文件
+*.log
+
+# 忽略特定目录下的所有文件（例如，所有名为 build 的目录）
+.cache/
+__pycache__/
+build/
+checkpoints/
+data/
+result/
+
+# 忽略根目录下的 TODO 文件，不会忽略 subdir/TODO
+/TODO
+
+# 忽略所有在任意深度下名为 build 的目录
+**/build/
+
+# 忽略所有 .txt 文件，除了根目录下的 readme.txt
+*.txt
+!readme.txt
+
+# 忽略所有 .pdf 文件，但不忽略 doc/manual.pdf
+*.pdf
+!doc/manual.pdf
+
+# 忽略 doc/notes.txt，但不忽略 doc/server/arch.txt
+doc/*.txt
+!doc/server/arch.txt
+
+# 忽略 doc 目录下所有扩展名为 txt 的文件（不包括 doc 目录下的子目录中的 .txt 文件）
+doc/**/*.txt
