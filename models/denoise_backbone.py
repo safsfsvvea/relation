@@ -4,14 +4,18 @@ from PIL import Image
 from torch import nn
 from feature_map_visualize.vitWrapper import ViTWrapper
 from feature_map_visualize.denoiser import Denoiser
+from util.misc import NestedTensor
+import torch.nn.functional as F
+
 class DenoisingVitBackbone(nn.Module):
-    def __init__(self, model_type, denoised=False, resize=None):
+    def __init__(self, model_type, device, train_backbone=False, denoised=True, resize=None):
         super().__init__()
         self.denoised = denoised
         self.model_type = model_type
+        self.train_backbone = train_backbone
         self.resize = resize
         self.patch_size = self.get_patch_size(model_type)
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = device
         self.model = self.load_model()
 
     def get_patch_size(self, model_type):
@@ -33,6 +37,9 @@ class DenoisingVitBackbone(nn.Module):
             model = ViTWrapper(self.model_type, stride=self.patch_size)
         model.to(self.device)
         model.eval()
+        if not self.train_backbone:
+            for param in model.parameters():
+                param.requires_grad = False
         return model
 
     def get_transform(self, img):
@@ -40,24 +47,22 @@ class DenoisingVitBackbone(nn.Module):
         if self.resize:
             img_size = (self.resize[0], self.resize[1])
         else:
-            original_size = img.size
+            _, _, H, W = img.shape
             img_size = (
-                (original_size[0] // self.patch_size) * self.patch_size,
-                (original_size[1] // self.patch_size) * self.patch_size,
+                (H // self.patch_size) * self.patch_size,
+                (W // self.patch_size) * self.patch_size,
             )
-        scale_x = img_size[0] / original_size[0]
-        scale_y = img_size[1] / original_size[1]
+        scale_x = img_size[0] / H
+        scale_y = img_size[1] / W
 
-        transform = T.Compose([
-            T.Resize(img_size, T.InterpolationMode.BICUBIC),
-            T.ToTensor(),
-        ])
-        return transform, (scale_x, scale_y)
+        img = F.interpolate(img, size=img_size, mode='bicubic', align_corners=False)
+        return img, (scale_x, scale_y)
 
-    def forward(self, img_path):
-        img = Image.open(img_path).convert('RGB')
-        transform, scales = self.get_transform(img)
-        img = transform(img).unsqueeze(0).to(self.device)
+    def forward(self, img):
+        # img = nested_tensor.tensors
+        # mask = nested_tensor.mask
+        img, scales = self.get_transform(img)
+        img = img.to(self.device)
         with torch.no_grad():
             features = self.model(img)
             raw_features = features['raw_vit_feats']
@@ -65,5 +70,6 @@ class DenoisingVitBackbone(nn.Module):
         return denoised_features, raw_features, scales
 
     def extract_features(self, img_path):
-        denoised_features, raw_features, scales = self(img_path)
+        img = Image.open(img_path).convert('RGB')
+        denoised_features, raw_features, scales = self(img) # need modify
         return denoised_features, raw_features, scales

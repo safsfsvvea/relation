@@ -558,8 +558,15 @@ class MixedRelDetection(torch.utils.data.Dataset):
             target['iscrowd'] = torch.tensor([0 for _ in range(boxes.shape[0])])
             target['area'] = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
             if self._transforms is not None:
+                print("before transform")
+                print("img.size: ", img.size)
+                print("img: ", img)
                 img, target = self._transforms(img, target) # target['boxes'].shape and target['labels'].shape may change
-
+                print("after transform")
+                print("img.size: ", img.shape)
+                print("img: ", img)
+                print("self._transforms: ", self._transforms)
+                
             # ******This 'keep' should be maintained because self._transform may eliminate some boxes******
             # which means that target['boxes'].shape and target['labels'].shape may change
             
@@ -716,7 +723,7 @@ def unique_name_dict_from_list(name_list):
 
 # Add color jitter to coco transforms
 def make_vg_transforms(image_set):
-
+    print("in the make_vg_transforms function.")
     normalize = T.Compose([
         T.ToTensor(),
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -1035,17 +1042,19 @@ def build(image_set, args):
         dataset = ConcatDataset([Vgdataset, Hicodataset])
 
     elif args.dataset_file == 'coco2017':
-        assert args.use_all_text_labels
+        # assert args.use_all_text_labels
         assert image_set == 'pretrain'
         dataset_list = ['coco2017']
         coco2017_img_folder = Path(args.coco_path) # / 'train2017'
         assert coco2017_img_folder.exists(), f'provided COCO2017 path {coco2017_img_folder} does not exist'
 
-        print("Annotation file we use: ", args.mixed_anno_file)
+        # print("Annotation file we use: ", args.mixed_anno_file)
+        print("Annotation file we use: ", args.coco_rel_anno_file)
         print("Keep_names_freq file we use: ", args.keep_names_freq_file)
+        print("it is coco2017 dataset!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         dataset = MixedRelDetection(
                           img_set = image_set,
-                          anno_file = args.mixed_anno_file,
+                          anno_file = args.coco_rel_anno_file,   # args.mixed_anno_file
                           keep_names_freq_file = args.keep_names_freq_file,
                           transforms = make_vg_transforms(image_set), 
                           num_queries = args.num_queries, 
