@@ -46,7 +46,7 @@ def build_dataset(image_set, args):
         return build_vcoco(image_set, args)
     if args.dataset_file in ['vg', 'vg_oi']:
         return build_vg(image_set, args)
-    if args.dataset_file in ['vg_coco2017_o365', 'vg_coco2017', 'coco2017', 'vg_hico', 'vg_coco2017_hico', 'vg_coco2017_o365_hico']:
+    if args.dataset_file in ['coco2017_det', 'vg_coco2017_o365', 'vg_coco2017', 'coco2017', 'vg_hico', 'vg_coco2017_hico', 'vg_coco2017_o365_hico']:
         return build_mixed(image_set, args)
     if args.dataset_file == 'oi_sgg':
         return build_oi_sgg(image_set, args)

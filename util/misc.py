@@ -301,6 +301,10 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
     if tensor_list[0].ndim == 3:
         # TODO make it support different-sized images
         max_size = _max_by_axis([list(img.shape) for img in tensor_list])
+        # 确保每个维度均为14的倍数
+        # TODO: generalize to patch size
+        max_size[1] = (max_size[1] + 13) // 14 * 14  # Height
+        max_size[2] = (max_size[2] + 13) // 14 * 14  # Width
         # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
         batch_shape = [len(tensor_list)] + max_size
         b, c, h, w = batch_shape

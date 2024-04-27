@@ -14,7 +14,8 @@
 python main.py \
     --coco_path /cluster/home/clin/clin/RLIPv2/data/coco2017 \
     --coco_rel_anno_file /cluster/home/clin/clin/RLIPv2/data/coco2017/annotations/RLIPv2_train2017_threshold20_Tagger2_Noi24_20e_Xattnmask_SceneGraph_model_large_caption_nucleus10_thre05.json \
-    --dataset_file coco2017 \
+    --coco_det_file /cluster/home/clin/clin/RLIPv2/data/coco2017/internimage/formatted_results.json \
+    --dataset_file coco2017_det \
     --num_queries 200 \
     --relation_threshold 0.20 \
     --num_workers 1 \

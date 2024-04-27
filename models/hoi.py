@@ -22,14 +22,20 @@ class HOIModel(nn.Module):
             nn.Linear(256, 117)  # Assuming 117 relation classes
         )
         self.to(self.device)
-    def forward(self, nested_tensor: NestedTensor , detections_batch):
+    def forward(self, nested_tensor: NestedTensor , targets, detections_batch):
+        
         images = nested_tensor.tensors
         mask = nested_tensor.mask
-        print("images: ", images.shape)
-        print("mask: ", mask.shape)
-        B, C, H, W = images.shape
+        # print("images: ", images.shape)
+        # print("mask: ", mask.shape)
+        # B, C, H, W = images.shape
+        
+        # assert images.shape[2:] == tuple(targets[0]["size"]), "Height and width of images do not match size in targets"
         # Process the whole batch through the backbone
         batch_denoised_features, _, scales = self.backbone(images)
+        # print("scale: ", scales)
+        downsampled_mask = F.interpolate(mask.unsqueeze(1).float(), size=(mask.shape[1] // self.patch_size, mask.shape[2] // self.patch_size), mode='nearest').bool().squeeze(1)
+        # print("downsampled_mask: ", downsampled_mask.shape)
         # print("batch_denoised_features: ", batch_denoised_features.shape)
         batch_size = images.size(0)
         all_pairs = []
@@ -38,7 +44,27 @@ class HOIModel(nn.Module):
         current_index = 0
 
         for b in range(batch_size):
-            detections = detections_batch[b]
+            H, W = targets[b]["size"]
+            input_detections = detections_batch[b]
+            detections = []
+            boxes = input_detections['boxes']
+            labels = input_detections['labels']
+            scores = input_detections['scores']
+            
+            for i, box in enumerate(boxes):
+                cx, cy, bw, bh = box
+                xmin = (cx - bw / 2) * W
+                ymin = (cy - bh / 2) * H
+                xmax = (cx + bw / 2) * W
+                ymax = (cy + bh / 2) * H
+                
+                detections.append({
+                    'category_id': labels[i].item(),
+                    'bbox': [xmin, ymin, xmax, ymax],
+                    'score': scores[i].item()
+                })
+            # print("detections in hoi: ", detections)
+
             denoised_features = batch_denoised_features[b]
             # print("denoised_features: ", denoised_features.shape)
             h, w, _ = denoised_features.shape

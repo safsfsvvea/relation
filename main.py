@@ -438,6 +438,8 @@ def get_args_parser():
                         help = "The annotation file for Objects365 relation detection, used in the ConcatDataset mode.")
     parser.add_argument('--coco_rel_anno_file', type=str, 
                         help = "The annotation file for COCO relation detection, used in the ConcatDataset mode.")
+    parser.add_argument('--coco_det_file', type=str, 
+                        help = "The detection result file for COCO, used in the ConcatDataset mode.")
     parser.add_argument('--vg_rel_anno_file', type=str, 
                         help = "The annotation file for VG relation detection, used in the ConcatDataset mode.")
     parser.add_argument('--vg_keep_names_freq_file', type=str, 
@@ -474,24 +476,24 @@ def get_args_parser():
     
     return parser
 
-def visualize_and_save_image(tensor, mask, filename):
-    """可视化并保存图像及其mask。"""
-    tensor = tensor.cpu().numpy().transpose(1, 2, 0)  # CHW to HWC
-    mask = mask.cpu().numpy()
+# def visualize_and_save_image(tensor, mask, filename):
+#     """可视化并保存图像及其mask。"""
+#     tensor = tensor.cpu().numpy().transpose(1, 2, 0)  # CHW to HWC
+#     mask = mask.cpu().numpy()
 
-    fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-    ax[0].imshow(tensor)
-    ax[0].set_title("Original Image")
-    ax[0].axis('off')
+#     fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+#     ax[0].imshow(tensor)
+#     ax[0].set_title("Original Image")
+#     ax[0].axis('off')
 
-    # 应用mask
-    masked_img = np.ma.masked_where(mask == 0, tensor)
-    ax[1].imshow(masked_img, interpolation='nearest')
-    ax[1].set_title("Masked Image")
-    ax[1].axis('off')
+#     # 应用mask
+#     masked_img = np.ma.masked_where(mask == 0, tensor)
+#     ax[1].imshow(masked_img, interpolation='nearest')
+#     ax[1].set_title("Masked Image")
+#     ax[1].axis('off')
 
-    plt.savefig(filename)
-    plt.show()
+#     plt.savefig(filename)
+#     plt.show()
  
 def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -501,20 +503,16 @@ def main(args):
     )
     print(backbone)
     model = HOIModel(backbone, device=device)
-    # img_path = '/cluster/home/clin/clin/feature_map_visualize/img/HICO_test2015_00000001.jpg'
-    # denoised_features, raw_features, scales = backbone.extract_features(img_path)
-    # print("denoised_features:", denoised_features.shape)
-    # print("raw_features:", raw_features.shape)
-    # print("scales:", scales)
+
     image_set_key = 'pretrain'
-    # print("image_set_key: ", image_set_key)
+
     dataset_train = build_dataset(image_set = image_set_key, args=args)
     if args.iterative_paradigm is None:
         # if args.distributed:
         #     sampler_train = DistributedSampler(dataset_train)
         # else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        print("it is here train!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        # print("it is here train!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         batch_sampler_train = torch.utils.data.BatchSampler(
             sampler_train, args.batch_size, drop_last=True)
@@ -524,11 +522,10 @@ def main(args):
                                                                args.batch_size,
                                                                args.iterative_paradigm,
                                                                drop_last=False)
-
+    # print("batch_sampler_train: ", batch_sampler_train)
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers)
-    with open('/cluster/home/clin/clin/RLIPv2/data/coco2017/internimage/formatted_results.json', 'r') as f:
-        detection_results = json.load(f)
+
     # for images, targets in data_loader_train:
     #     nested_tensor = images.to(device)
     #     img_tensors = nested_tensor.tensors  # 实际的图像数据
@@ -553,20 +550,14 @@ def main(args):
     #         visualize_and_save_image(img_tensor, mask, f"output_image_{i}.png")
 
     #     break  # 只处理第一批数据
-    for images, targets in data_loader_train:
+    # print("data_loader_train: ", data_loader_train)
+    for images, targets, detections in data_loader_train:
         images = images.to(device)
-        img_ids = [target['image_id'] for target in targets]
-        batch_detections = [detection_results.get(str(img_id), []) for img_id in img_ids]
-        # print("batch_detections: ", batch_detections)
-        # out = model(images, batch_detections)
+
+        out = model(images, targets, detections)
+        print("verb_labels: ", targets[0]["verb_labels"])
+        print("verb_labels shape: ", targets[0]["verb_labels"].shape)
         # print(out)
-    # backbone = DINOv2Backbone(
-    #     model_type="dinov2_vitb14_reg",
-    #     patch_size=14,
-    #     pretrained_path='/cluster/home/clin/clin/RLIPv2/checkpoints/DINOv2/dinov2_vitb14_reg4_pretrain.pth'
-    # )
-    # features, scales = backbone.extract_features(img_path)
-    # print("提取的特征:", features["layer_1"].shape, "缩放比例:", scales)
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('relation training and evaluation script', parents=[get_args_parser()])
