@@ -40,7 +40,7 @@ def build_dataset(image_set, args):
         return build_coco_panoptic(image_set, args)
     if args.dataset_file == 'o365_det':
         return build_o365(image_set, args)
-    if args.dataset_file == 'hico':
+    if args.dataset_file in ['hico', 'hico_det']:
         return build_hico(image_set, args)
     if args.dataset_file == 'vcoco':
         return build_vcoco(image_set, args)

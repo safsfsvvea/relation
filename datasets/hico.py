@@ -24,6 +24,7 @@ import torchvision
 from typing import List
 
 import datasets.transforms as T
+from datasets import transforms_det as T_det
 import cv2
 import os
 import math
@@ -260,6 +261,256 @@ class HICODetection(torch.utils.data.Dataset):
         self.correct_mat = np.load(path)
         # self.correct_mat shape: [117, 80]
         # print(self.correct_mat.shape)
+        
+class HICODetection_det(torch.utils.data.Dataset):
+    def __init__(self, img_set, img_folder, anno_file, detection_results, transforms, num_queries, args = None):
+        self.img_set = img_set
+        self.img_folder = img_folder
+        with open(anno_file, 'r') as f:
+            self.annotations = json.load(f)
+            
+        with open(detection_results, 'r') as f:
+            self.detection_results = json.load(f)
+        # print(len(self.annotations))
+        # print(type(self.annotations))
+        # print(self.annotations[0])
+        self._transforms = transforms
+
+        self.num_queries = num_queries
+
+        # 80 object classes
+        self._valid_obj_ids = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13,
+                               14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                               24, 25, 27, 28, 31, 32, 33, 34, 35, 36,
+                               37, 38, 39, 40, 41, 42, 43, 44, 46, 47,
+                               48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
+                               58, 59, 60, 61, 62, 63, 64, 65, 67, 70,
+                               72, 73, 74, 75, 76, 77, 78, 79, 80, 81,
+                               82, 84, 85, 86, 87, 88, 89, 90)
+        # 117 verb classes
+        self._valid_verb_ids = list(range(1, 118))
+
+        if img_set == 'train':
+            self.ids = []
+            for idx, img_anno in enumerate(self.annotations):
+                for hoi in img_anno['hoi_annotation']:
+                    if hoi['subject_id'] >= len(img_anno['annotations']) or hoi['object_id'] >= len(img_anno['annotations']):
+                        break
+                else:
+                    self.ids.append(idx)
+        else:
+            self.ids = list(range(len(self.annotations)))
+        # self.ids = self.ids[:1000]
+        
+        self.object_text = load_hico_object_txt()
+        self.verb_text = load_hico_verb_txt()
+        self.use_correct_subject_category_hico = args.use_correct_subject_category_hico
+        if self.use_correct_subject_category_hico:
+            print("Use correct subject category: 0 (rather than 1).")
+
+    def __len__(self):
+        return len(self.ids)
+
+    def __getitem__(self, idx):
+        img_anno = self.annotations[self.ids[idx]]
+
+        img = Image.open(self.img_folder / img_anno['file_name']).convert('RGB')
+        # print(img_anno['file_name'])
+        # print(img.size)
+        w, h = img.size
+        
+        detections = self.detection_results.get(img_anno['file_name'], [])
+
+        detection_boxes = [det['bbox'] for det in detections]
+        detection_labels = [det['category_id'] for det in detections]
+        detection_scores = [det['score'] for det in detections]
+        detection = {}
+        detection['boxes'] = torch.tensor(detection_boxes, dtype=torch.float32) if detection_boxes else torch.tensor([], dtype=torch.float32).reshape(0, 4)
+        detection['labels'] = torch.tensor(detection_labels, dtype=torch.int64) if detection_labels else torch.tensor([], dtype=torch.int64)
+        detection['scores'] = torch.tensor(detection_scores, dtype=torch.float32) if detection_scores else torch.tensor([], dtype=torch.float32)
+        # make sure that #queries are more than #bboxes
+        if self.img_set == 'train' and len(img_anno['annotations']) > self.num_queries:
+            img_anno['annotations'] = img_anno['annotations'][:self.num_queries]
+
+        # collect coordinates for all bboxes
+        boxes = [obj['bbox'] for obj in img_anno['annotations']]
+        # guard against no boxes via resizing
+        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+
+        # Get the object index_id in the range of 80 classes. 
+        # This is quite confusing because COCO has 80 classes but has ids 1~90. 
+        if self.img_set == 'train':
+            # Add index for confirming which boxes are kept after image transformation
+            classes = [(i, self._valid_obj_ids.index(obj['category_id'])) for i, obj in enumerate(img_anno['annotations'])]
+        else:
+            classes = [self._valid_obj_ids.index(obj['category_id']) for obj in img_anno['annotations']]
+        classes = torch.tensor(classes, dtype=torch.int64)
+
+        target = {}
+        target['orig_size'] = torch.as_tensor([int(h), int(w)])
+        target['size'] = torch.as_tensor([int(h), int(w)])
+        if self.img_set == 'train':
+            # clamp the box and drop those unreasonable ones
+            boxes[:, 0::2].clamp_(min=0, max=w)  # xyxy    clamp x to 0~w
+            boxes[:, 1::2].clamp_(min=0, max=h)  # xyxy    clamp y to 0~h
+            
+            detection['boxes'][:, 0::2].clamp_(min=0, max=w)  # clamp x to 0~w
+            detection['boxes'][:, 1::2].clamp_(min=0, max=h)  # clamp y to 0~h
+            
+            keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
+            boxes = boxes[keep]
+            classes = classes[keep]
+
+            # construct target dict
+            target['boxes'] = boxes
+            target['labels'] = classes  # like [[0, 0][1, 56][2, 0][3, 0]...]
+            target['iscrowd'] = torch.tensor([0 for _ in range(boxes.shape[0])])
+            target['area'] = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+
+            if self._transforms is not None:
+                img, target, detection = self._transforms(img, target, detection)
+                # print(img.shape)
+
+
+            # enumerated indices for kept (0, 1, 2, 3, 4, ...)
+            kept_box_indices = [label[0] for label in target['labels']]
+            # object classes in 80 classes
+            target['labels'] = target['labels'][:, 1]
+
+            obj_labels, verb_labels, sub_boxes, obj_boxes = [], [], [], []
+            sub_obj_pairs = []
+            for hoi in img_anno['hoi_annotation']:
+                if hoi['subject_id'] not in kept_box_indices or hoi['object_id'] not in kept_box_indices:
+                    continue
+                sub_obj_pair = (hoi['subject_id'], hoi['object_id'])
+                if sub_obj_pair in sub_obj_pairs:
+                    verb_labels[sub_obj_pairs.index(sub_obj_pair)][self._valid_verb_ids.index(hoi['category_id'])] = 1
+                else:
+                    sub_obj_pairs.append(sub_obj_pair)
+                    obj_labels.append(target['labels'][kept_box_indices.index(hoi['object_id'])])
+                    verb_label = [0 for _ in range(len(self._valid_verb_ids))]
+                    # verb category_id in the range from 1 to 117
+                    verb_label[self._valid_verb_ids.index(hoi['category_id'])] = 1
+                    # Set all verb labels to 1
+                    sub_box = target['boxes'][kept_box_indices.index(hoi['subject_id'])]
+                    obj_box = target['boxes'][kept_box_indices.index(hoi['object_id'])]
+                    verb_labels.append(verb_label)
+                    sub_boxes.append(sub_box)
+                    obj_boxes.append(obj_box)
+
+            target['filename'] = img_anno['file_name']
+            detection['filename'] = img_anno['file_name']
+            
+            target['obj_classes'] = self.object_text
+            target['verb_classes'] = self.verb_text
+            if len(sub_obj_pairs) == 0:
+                target['obj_labels'] = torch.zeros((0,), dtype=torch.int64)
+                target['sub_labels'] = torch.zeros((0,), dtype=torch.int64)
+                target['verb_labels'] = torch.zeros((0, len(self._valid_verb_ids)), dtype=torch.float32)
+                target['sub_boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+                target['obj_boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+            else:
+                target['obj_labels'] = torch.stack(obj_labels)
+                # I assume the sub_labels are not used in the following experiments.
+                # Thus, it's okay to set it to all ones. Otherwise, we should set it to all zeros.
+                if self.use_correct_subject_category_hico:
+                    target['sub_labels'] = torch.zeros((len(obj_labels),), dtype=torch.int64)
+                    # print(target['sub_labels'][0])
+                else:
+                    target['sub_labels'] = torch.ones((len(obj_labels),), dtype=torch.int64)
+                target['verb_labels'] = torch.as_tensor(verb_labels, dtype=torch.float32)
+                target['sub_boxes'] = torch.stack(sub_boxes)
+                target['obj_boxes'] = torch.stack(obj_boxes)
+        else:
+            target['filename'] = img_anno['file_name']
+            target['boxes'] = boxes # 
+            target['labels'] = classes # 
+            target['id'] = idx # img_idx
+            
+
+            if self._transforms is not None:
+                img, _ = self._transforms(img, None)
+
+            hois = []
+            for hoi in img_anno['hoi_annotation']:
+                hois.append((hoi['subject_id'], hoi['object_id'], self._valid_verb_ids.index(hoi['category_id'])))
+                # if len(self._valid_verb_ids.index(hoi['category_id'])) >=2:
+                #     print(self._valid_verb_ids.index(hoi['category_id']))
+            target['hois'] = torch.as_tensor(hois, dtype=torch.int64)
+
+        return img, target, detection
+
+    def set_rare_hois(self, anno_file):
+        with open(anno_file, 'r') as f:
+            annotations = json.load(f)
+
+        counts = defaultdict(lambda: 0)
+        for img_anno in annotations:
+            hois = img_anno['hoi_annotation']
+            bboxes = img_anno['annotations']
+            for hoi in hois:
+                triplet = (self._valid_obj_ids.index(bboxes[hoi['subject_id']]['category_id']),
+                           self._valid_obj_ids.index(bboxes[hoi['object_id']]['category_id']),
+                           self._valid_verb_ids.index(hoi['category_id']))
+                counts[triplet] += 1
+        self.rare_triplets = []
+        self.non_rare_triplets = []
+        for triplet, count in counts.items():
+            if count < 10:
+                self.rare_triplets.append(triplet)
+            else:
+                self.non_rare_triplets.append(triplet)
+
+    def set_seen_hois(self, unseen_list, hoi_list_new_path, zero_shot_setting):
+        """
+        This functions aims to set unseen verb class indices:
+        To make the implementation easy, we still use the defined attribute "self.rare_triplets", "self.non_rare_triplets"
+        It means that when we are using this function, 
+            self.rare_triplets stores a list for unseen triplets (comparably hard).
+            self.non_rare_triplets stores a list for seen triplets (comparably easy).
+        """
+        with open(hoi_list_new_path, 'r') as f:
+            hoi_list_new = json.load(f)
+        
+        self.rare_triplets = []
+        for u in unseen_list:
+            assert u == int(hoi_list_new[u]["id"]) - 1
+            triplet = (0, 
+                       self._valid_obj_ids.index(hoi_list_new[u]["object_cat"]),
+                       self._valid_verb_ids.index(hoi_list_new[u]["verb_id"]))
+            self.rare_triplets.append(triplet)
+        
+        self.non_rare_triplets = []
+        assert max(unseen_list) < 600
+        seen_list = [i for i in range(600) if i not in unseen_list]
+        for s in seen_list:
+            assert s == int(hoi_list_new[s]["id"]) - 1
+            triplet = (0, 
+                       self._valid_obj_ids.index(hoi_list_new[s]["object_cat"]),
+                       self._valid_verb_ids.index(hoi_list_new[s]["verb_id"]))
+            self.non_rare_triplets.append(triplet)
+        
+        print('Set {:d} unseen (rare) triplets and {:d} seen (non-rare) triplets.'.format(len(self.rare_triplets), len(self.non_rare_triplets)))
+
+    def remove_text_unseen(self, zero_shot_setting):
+        """
+        If we use zero-shot setting like 'UO' or 'UV', 
+        we need to remove these texts from the input label sequence.  
+        But do we need this?
+        """
+        assert zero_shot_setting in ['UO']
+        if zero_shot_setting == 'UO' and self.img_set == 'train':
+            ### This is to ensure that we exclude objs that are not in the training set.
+            unseen_obj_name = ['dog', 'baseball bat', 'clock', 'elephant', 'frisbee',\
+                               'pizza', 'skateboard', 'tennis racket', 'toothbrush', 'zebra']
+            for u in unseen_obj_name:
+                self.object_text.remove(u)
+            print('Zero-shot setting: UO, {} texts remain, removing {}'.format(len(self.object_text), ', '.join(unseen_obj_name)))
+
+    def load_correct_mat(self, path):
+        self.correct_mat = np.load(path)
+        # self.correct_mat shape: [117, 80]
+        # print(self.correct_mat.shape)
 
 def load_hico_verb_txt(file_path = 'datasets/hico_verb_names.txt') -> List[list]:
     '''
@@ -343,7 +594,7 @@ class HICODetectionhm(torch.utils.data.Dataset):
         else:
             classes = [self._valid_obj_ids.index(obj['category_id']) for obj in img_anno['annotations']]
         classes = torch.tensor(classes, dtype=torch.int64)
-
+        print("classes: ", classes)
         target = {}
         target['orig_size'] = torch.as_tensor([int(h), int(w)])
         target['size'] = torch.as_tensor([int(h), int(w)])
@@ -500,7 +751,38 @@ def make_hico_transforms(image_set):
 
     raise ValueError(f'unknown {image_set}')
 
+# Add detection results to hico transforms
+def make_hico_det_transforms(image_set):
 
+    normalize = T_det.Compose([
+        T_det.ToTensor(),
+        T_det.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+    scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+
+    if image_set == 'train':
+        return T_det.Compose([
+            T_det.RandomHorizontalFlip(),
+            T_det.ColorJitter(.4, .4, .4),
+            T_det.RandomSelect(
+                T_det.RandomResize(scales, max_size=1333),
+                T_det.Compose([
+                    T_det.RandomResize([400, 500, 600]),
+                    T_det.RandomSizeCrop(384, 600),
+                    T_det.RandomResize(scales, max_size=1333),
+                ])
+            ),
+            normalize,
+        ])
+
+    if image_set == 'val':
+        return T.Compose([
+            T.RandomResize([800], max_size=1333),
+            normalize,
+        ])
+
+    raise ValueError(f'unknown {image_set}')
 
 def save_image_tensor2cv2(input_tensor: torch.Tensor, filename):
     """
@@ -561,8 +843,19 @@ def build(image_set, args):
         dataset = HICODetectionhm(image_set, img_folder, anno_file, transforms=make_hico_transforms(image_set),
                                 num_queries=args.num_queries)
     else:
-        dataset = HICODetection(image_set, img_folder, anno_file, transforms=make_hico_transforms(image_set),
+        if args.dataset_file == 'hico_det':
+            dataset = HICODetection_det(image_set, img_folder, anno_file, detection_results = args.hico_det_file, transforms=make_hico_det_transforms(image_set),
                                 num_queries=args.num_queries, args = args)
+            print("it is HICODetection_det!!!!!!!!!!!!!!!!!!")
+            print("image_set: ", image_set)
+            print("args.zero_shot_setting: ", args.zero_shot_setting)
+            print("args.few_shot_transfer: ", args.few_shot_transfer)
+            print("args.use_correct_subject_category_hico: ", args.use_correct_subject_category_hico)
+            print("args.relation_label_noise: ", args.relation_label_noise)
+        else:
+            dataset = HICODetection(image_set, img_folder, anno_file, transforms=make_hico_transforms(image_set),
+                                    num_queries=args.num_queries, args = args)
+        
     
     ### Set zero-shot indices 
     # Need to ensure that we can not use both few_shot_transfer and zero_shot_setting

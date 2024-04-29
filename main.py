@@ -438,8 +438,12 @@ def get_args_parser():
                         help = "The annotation file for Objects365 relation detection, used in the ConcatDataset mode.")
     parser.add_argument('--coco_rel_anno_file', type=str, 
                         help = "The annotation file for COCO relation detection, used in the ConcatDataset mode.")
+    
     parser.add_argument('--coco_det_file', type=str, 
-                        help = "The detection result file for COCO, used in the ConcatDataset mode.")
+                        help = "The detection result file for COCO")
+    parser.add_argument('--hico_det_file', type=str, 
+                        help = "The detection result file for HICO")
+    
     parser.add_argument('--vg_rel_anno_file', type=str, 
                         help = "The annotation file for VG relation detection, used in the ConcatDataset mode.")
     parser.add_argument('--vg_keep_names_freq_file', type=str, 
@@ -504,7 +508,7 @@ def main(args):
     print(backbone)
     model = HOIModel(backbone, device=device)
 
-    image_set_key = 'pretrain'
+    image_set_key = 'train'
 
     dataset_train = build_dataset(image_set = image_set_key, args=args)
     if args.iterative_paradigm is None:
@@ -555,8 +559,13 @@ def main(args):
         images = images.to(device)
 
         out = model(images, targets, detections)
-        print("verb_labels: ", targets[0]["verb_labels"])
-        print("verb_labels shape: ", targets[0]["verb_labels"].shape)
+        print("-----------------------------")
+        print("out[0]: ", out[0])
+        print("verb_labels[0]: ", targets[0]["verb_labels"])
+        print("verb_labels shape[0]: ", targets[0]["verb_labels"].shape)
+        print("targets['verb_classes'][0]: ", targets[0]['verb_classes'])
+        # print("targets['verb_classes'] shape: ", targets[0]['verb_classes'].shape)
+        print("-----------------------------")
         # print(out)
     
 if __name__ == "__main__":

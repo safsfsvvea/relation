@@ -19,6 +19,45 @@ from torch import nn
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 from torch.nn.utils.rnn import pad_packed_sequence, pad_sequence
 
+class HungarianMatcherHOI_det(nn.Module):
+    def __init__(self, cost_class: float = 1, cost_verb: float = 1):
+        super().__init__()
+        self.cost_class = cost_class
+        self.cost_verb = cost_verb
+
+    def forward(self, outputs, targets):
+        """
+        Args:
+            outputs: dict containing model outputs with keys 'pred_logits' which are the logits for each HOI pair [batch_size, num_pairs, num_classes]
+            targets: list of dictionaries containing the ground truth labels with keys 'labels' which are the one-hot encoded truth labels for each image [num_pairs, num_classes]
+
+        Returns:
+            matches: list of tuples (src_indices, tgt_indices) representing the matched indices for the batch
+        """
+        bs = len(targets)
+        num_classes = targets[0]['labels'].shape[1]
+        pred_logits = outputs['pred_logits']
+        
+        # We assume here that targets are padded to have the same number of pairs with zero-padding if necessary
+        # Flatten all batch data to apply Hungarian algorithm over it
+        pred_probs = torch.sigmoid(pred_logits)  # Apply sigmoid since it's a multi-label classification
+        
+        all_matches = []
+
+        for b in range(bs):
+            # Get the number of actual pairs (non-padded) for the current batch item
+            num_pairs = len(targets[b]['labels'])
+            tgt_labels = targets[b]['labels']
+
+            # Calculate the cost matrix based on binary cross entropy
+            cost = F.binary_cross_entropy(pred_probs[b][:num_pairs], tgt_labels, reduction='none').sum(dim=1)  # Sum BCE losses over all classes
+
+            # Perform Hungarian matching
+            row_ind, col_ind = linear_sum_assignment(cost.cpu().detach().numpy())
+            all_matches.append((row_ind, col_ind))
+        
+        return all_matches
+
 class HungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
 

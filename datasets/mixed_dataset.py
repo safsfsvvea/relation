@@ -818,7 +818,9 @@ class MixedRelDetectionWithDet(torch.utils.data.Dataset):
             rel_unique = unique_name_dict_from_list(self.relationship_names)
         else:
             obj_unique = unique_name_dict_from_anno(objects_anno, 'objects')
+            print("relationships_anno:", relationships_anno)
             rel_unique = unique_name_dict_from_anno(relationships_anno, 'relationships')
+            print("rel_unique:", rel_unique)
         obj_classes = [(idx_cur_box, obj_unique[cur_box['names']]) for idx_cur_box, cur_box in enumerate(objects_anno)]
         obj_classes = torch.tensor(obj_classes, dtype=torch.int64)
         
@@ -865,6 +867,7 @@ class MixedRelDetectionWithDet(torch.utils.data.Dataset):
             sub_labels, obj_labels, predicate_labels, sub_boxes, obj_boxes = [], [], [], [], []
             sub_obj_pairs = []
             relationships_anno_local = add_local_object_id(relationships_anno, objects_anno)
+            print("relationships_anno_local:", relationships_anno_local)
             for cur_rel_local in relationships_anno_local:
                 # Make sure that sub and obj are not eliminated by self._transform.
                 if cur_rel_local['subject_id_local'] not in kept_box_indices or \
@@ -1013,7 +1016,6 @@ def unique_name_dict_from_list(name_list):
 
 # Add color jitter to coco transforms
 def make_vg_transforms(image_set):
-    print("in the make_vg_transforms function.")
     normalize = T.Compose([
         T.ToTensor(),
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -1047,7 +1049,6 @@ def make_vg_transforms(image_set):
 
 # Add detection result transform to make_vg_transforms
 def make_det_transforms(image_set):
-    print("in the make_vg_transforms function.")
     normalize = T_det.Compose([
         T_det.ToTensor(),
         T_det.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -1072,8 +1073,8 @@ def make_det_transforms(image_set):
         ])
 
     if image_set == 'val':
-        return T_det.Compose([
-            T_det.RandomResize([800], max_size=1333),
+        return T.Compose([
+            T.RandomResize([800], max_size=1333),
             normalize,
         ])
 
@@ -1412,6 +1413,22 @@ def build(image_set, args):
                             vg_folder = None,
                             coco2017_folder = coco2017_img_folder,
                             o365_folder = None)
+    elif args.dataset_file == 'hico_det':
+        hico_img_folder = Path(args.hico_path) / 'images' / 'train2015'
+        assert hico_img_folder.exists(), f'provided VG path {hico_img_folder} does not exist'
+        Hicodataset = MixedRelDetection(
+                          img_set = image_set,
+                          anno_file = args.hico_rel_anno_file,
+                        #   keep_names_freq_file = args.vg_keep_names_freq_file,
+                          transforms = make_det_transforms(image_set), 
+                          num_queries = args.num_queries, 
+                          relation_threshold = args.relation_threshold,
+                          pair_overlap = args.pair_overlap,
+                          dataset = ['hico'],
+                          vg_folder = None,
+                          coco2017_folder = None,
+                          o365_folder = None,
+                          hico_folder = hico_img_folder)
     return dataset
 
 
