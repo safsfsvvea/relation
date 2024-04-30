@@ -1,11 +1,13 @@
 from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
-from models.hoi import HOIModel
+from models.hoi import HOIModel, CriterionHOI
+from models.matcher import HungarianMatcherHOI_det
+from engine import train_one_epoch
 import datasets
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset, BatchIterativeDistributedSampler
-from engine import evaluate, train_one_epoch, evaluate_hoi, evaluate_hoi_with_text, evaluate_hoi_with_text_matching_uniformity, \
-        evaluate_sgg_with_text
+# from engine import evaluate, train_one_epoch, evaluate_hoi, evaluate_hoi_with_text, evaluate_hoi_with_text_matching_uniformity, \
+#         evaluate_sgg_with_text
 import json       
 import argparse
 import datetime
@@ -17,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-
+from torch.utils.tensorboard import SummaryWriter
 
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
@@ -480,34 +482,26 @@ def get_args_parser():
     
     return parser
 
-# def visualize_and_save_image(tensor, mask, filename):
-#     """可视化并保存图像及其mask。"""
-#     tensor = tensor.cpu().numpy().transpose(1, 2, 0)  # CHW to HWC
-#     mask = mask.cpu().numpy()
 
-#     fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-#     ax[0].imshow(tensor)
-#     ax[0].set_title("Original Image")
-#     ax[0].axis('off')
-
-#     # 应用mask
-#     masked_img = np.ma.masked_where(mask == 0, tensor)
-#     ax[1].imshow(masked_img, interpolation='nearest')
-#     ax[1].set_title("Masked Image")
-#     ax[1].axis('off')
-
-#     plt.savefig(filename)
-#     plt.show()
- 
 def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     backbone = DenoisingVitBackbone(
         model_type="vit_base_patch14_dinov2.lvd142m", device=device,
         denoised=True
     )
-    print(backbone)
+    # print(backbone)
     model = HOIModel(backbone, device=device)
-
+    matcher = HungarianMatcherHOI_det(
+        device=device,
+        cost_obj_class=args.set_cost_obj_class,
+        cost_verb_class=args.set_cost_verb_class,
+        cost_bbox=args.set_cost_bbox,
+        cost_giou=args.set_cost_giou
+    )
+    criterion = CriterionHOI(matcher=matcher, device=device)
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
+                                  weight_decay=args.weight_decay)
+    print("Number of parameters in optimizer:", len(list(optimizer.param_groups[0]['params'])))
     image_set_key = 'train'
 
     dataset_train = build_dataset(image_set = image_set_key, args=args)
@@ -530,42 +524,31 @@ def main(args):
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
-    # for images, targets in data_loader_train:
-    #     nested_tensor = images.to(device)
-    #     img_tensors = nested_tensor.tensors  # 实际的图像数据
-    #     masks = nested_tensor.mask  # mask数据
 
-    #     img_ids = [target['image_id'] for target in targets]
-    #     batch_detections = [detection_results.get(str(img_id), []) for img_id in img_ids]
+    tensorboard_writer = SummaryWriter(log_dir='logs')
+    num_epochs = args.epochs
+    start_time = time.time()
+    for epoch in range(num_epochs):
+        train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
+    elapsed_time = time.time() - start_time
+    print(f"Training completed in {elapsed_time:.2f} seconds")
+    tensorboard_writer.close()
 
-    #     # 仅处理和可视化第一批数据
-    #     for i in range(len(img_tensors)):
-    #         img_tensor = img_tensors[i]
-    #         mask = masks[i] if masks is not None else torch.ones(img_tensor.size(1), img_tensor.size(2))  # 如果没有mask，默认为全1
-
-    #         # 数据标准化反向操作（如果有进行过标准化）
-    #         mean = np.array([0.485, 0.456, 0.406])
-    #         std = np.array([0.229, 0.224, 0.225])
-    #         img_tensor = img_tensor.permute(1, 2, 0)  # CHW to HWC for visualization
-    #         img_tensor = img_tensor * torch.tensor(std) + torch.tensor(mean)
-    #         img_tensor = img_tensor.clamp(0, 1)
-
-    #         # 可视化和保存图像
-    #         visualize_and_save_image(img_tensor, mask, f"output_image_{i}.png")
-
-    #     break  # 只处理第一批数据
-    # print("data_loader_train: ", data_loader_train)
-    for images, targets, detections in data_loader_train:
-        images = images.to(device)
-
-        out = model(images, targets, detections)
-        print("-----------------------------")
-        print("out[0]: ", out[0])
-        print("verb_labels[0]: ", targets[0]["verb_labels"])
-        print("verb_labels shape[0]: ", targets[0]["verb_labels"].shape)
-        print("targets['verb_classes'][0]: ", targets[0]['verb_classes'])
-        # print("targets['verb_classes'] shape: ", targets[0]['verb_classes'].shape)
-        print("-----------------------------")
+    # for images, targets, detections in data_loader_train:
+    #     images = images.to(device)
+    #     targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
+    #     out = model(images, targets, detections)
+    #     # all_indices = matcher(out, targets)
+    #     # print("all_indices: ", all_indices)
+    #     loss = criterion(out, targets)
+    #     print("loss: ", loss)
+        # print("-----------------------------")
+        # print("out[0]: ", out[0])
+        # print("verb_labels[0]: ", targets[0]["verb_labels"])
+        # print("verb_labels shape[0]: ", targets[0]["verb_labels"].shape)
+        # print("targets['verb_classes'][0]: ", targets[0]['verb_classes'])
+        # # print("targets['verb_classes'] shape: ", targets[0]['verb_classes'].shape)
+        # print("-----------------------------")
         # print(out)
     
 if __name__ == "__main__":

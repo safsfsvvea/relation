@@ -9,7 +9,7 @@ build/
 checkpoints/
 data/
 result/
-
+logs/
 # 忽略根目录下的 TODO 文件，不会忽略 subdir/TODO
 /TODO
 

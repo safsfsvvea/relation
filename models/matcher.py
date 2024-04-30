@@ -18,45 +18,100 @@ from torch import nn
 
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 from torch.nn.utils.rnn import pad_packed_sequence, pad_sequence
+import torch.nn.functional as F
 
 class HungarianMatcherHOI_det(nn.Module):
-    def __init__(self, cost_class: float = 1, cost_verb: float = 1):
+    def __init__(self, device, cost_obj_class=1.0, cost_verb_class=1.0, cost_bbox=1.0, cost_giou=1.0):
         super().__init__()
-        self.cost_class = cost_class
-        self.cost_verb = cost_verb
+        self.device = device
+        self.cost_obj_class = cost_obj_class
+        self.cost_verb_class = cost_verb_class
+        self.cost_bbox = cost_bbox
+        self.cost_giou = cost_giou
 
+    @torch.no_grad()
     def forward(self, outputs, targets):
-        """
-        Args:
-            outputs: dict containing model outputs with keys 'pred_logits' which are the logits for each HOI pair [batch_size, num_pairs, num_classes]
-            targets: list of dictionaries containing the ground truth labels with keys 'labels' which are the one-hot encoded truth labels for each image [num_pairs, num_classes]
+        batch_size = len(outputs)
+        all_indices = []
 
-        Returns:
-            matches: list of tuples (src_indices, tgt_indices) representing the matched indices for the batch
-        """
-        bs = len(targets)
-        num_classes = targets[0]['labels'].shape[1]
-        pred_logits = outputs['pred_logits']
-        
-        # We assume here that targets are padded to have the same number of pairs with zero-padding if necessary
-        # Flatten all batch data to apply Hungarian algorithm over it
-        pred_probs = torch.sigmoid(pred_logits)  # Apply sigmoid since it's a multi-label classification
-        
-        all_matches = []
+        for idx in range(batch_size):
+            pred = outputs[idx]
+            tgt = targets[idx]
+            # print("pred: ", pred)
+            if len(pred) == 0:
+                all_indices.append(([], []))
+                continue
+            # 将输出和目标的 bbox, logits 转化为 Tensor 并计算概率或使用已有分数
+            pred_sub_boxes = torch.tensor([p['subject_bbox'] for p in pred], device=self.device)
+            pred_obj_boxes = torch.tensor([p['object_bbox'] for p in pred], device=self.device)
+            pred_obj_scores = torch.tensor([p['object_score'] for p in pred], device=self.device)
+            pred_obj_labels = torch.tensor([p['object_category'] for p in pred], device=self.device)
+            pred_verb_scores = torch.stack([torch.tensor(p['relation_score'], device=self.device) for p in pred])
+            # pred_verb_scores = torch.stack([torch.tensor(p['relation_score'], device=self.device).clone().detach() for p in pred])
 
-        for b in range(bs):
-            # Get the number of actual pairs (non-padded) for the current batch item
-            num_pairs = len(targets[b]['labels'])
-            tgt_labels = targets[b]['labels']
+            tgt_sub_boxes = tgt['sub_boxes'].to(self.device)
+            tgt_obj_boxes = tgt['obj_boxes'].to(self.device)
+            tgt_obj_labels = tgt['obj_labels'].to(self.device)
+            tgt_verb_labels = tgt['verb_labels'].to(self.device)
+            # print("tgt_obj_labels:", tgt_obj_labels)
+            # print("pred_obj_scores:", pred_obj_scores)
+            num_classes = 80  # Including no object class
+            pred_obj_probs = torch.zeros(len(pred), num_classes)
+            for i, score in enumerate(pred_obj_scores):
+                non_target_prob = (1 - score) / (num_classes - 1)
+                pred_obj_probs[i] = non_target_prob
+                pred_obj_probs[i, pred_obj_labels[i]-1] = score
+            pred_obj_probs = torch.clamp(pred_obj_probs, min=1e-6, max=1-1e-6)  # 避免log(0)错误
+            # print("pred_obj_probs: ", pred_obj_probs)
+            # print("pred_obj_probs shape: ", pred_obj_probs.shape)
+            pred_obj_logits = torch.log(pred_obj_probs / (1 - pred_obj_probs)).to(self.device)
+            # print("pred_obj_logits: ", pred_obj_logits)
+            # print("pred_obj_logits shape: ", pred_obj_logits.shape)
+            # 将pred_sub_boxes和pred_obj_boxes分别除以相应的tgt["size"]
+            H, W = tgt['size']
+            pred_sub_boxes[:, 0] /= W
+            pred_sub_boxes[:, 1] /= H
+            pred_sub_boxes[:, 2] /= W
+            pred_sub_boxes[:, 3] /= H
+            pred_obj_boxes[:, 0] /= W
+            pred_obj_boxes[:, 1] /= H
+            pred_obj_boxes[:, 2] /= W
+            pred_obj_boxes[:, 3] /= H
 
-            # Calculate the cost matrix based on binary cross entropy
-            cost = F.binary_cross_entropy(pred_probs[b][:num_pairs], tgt_labels, reduction='none').sum(dim=1)  # Sum BCE losses over all classes
+            # print("pred_obj_boxes: ", pred_obj_boxes)
 
-            # Perform Hungarian matching
-            row_ind, col_ind = linear_sum_assignment(cost.cpu().detach().numpy())
-            all_matches.append((row_ind, col_ind))
-        
-        return all_matches
+            
+            cost_class = torch.zeros(len(pred), len(tgt_obj_labels), device=self.device)
+            # for i, score in enumerate(pred_obj_logits):
+            #     print("score device: ", score.device)
+            #     print("tgt_obj_labels device: ", tgt_obj_labels.device)
+            #     cost_class[i] = F.cross_entropy(score.unsqueeze(0).expand(len(tgt_obj_labels), -1), tgt_obj_labels.unsqueeze(0), reduction='none')
+            for i in range(len(pred)):
+                # 这里每个预测对所有标签计算交叉熵，确保每个预测都与每个目标标签比较
+                expanded_logits = pred_obj_logits[i].unsqueeze(0).expand(len(tgt_obj_labels), -1)
+                cost_class[i] = F.cross_entropy(expanded_logits, tgt_obj_labels, reduction='none')
+            # print("cost_class shape: ", cost_class.shape)
+            cost_verb = torch.zeros(len(pred), len(tgt_verb_labels), device=self.device)
+            for i, score in enumerate(pred_verb_scores):
+                # 扩展预测得分向量以匹配标签的批量大小
+                expanded_scores = score.unsqueeze(0).expand(len(tgt_verb_labels), -1)
+                # 计算每个预测与所有目标标签之间的成本
+                cost_verb[i] = F.binary_cross_entropy_with_logits(expanded_scores, tgt_verb_labels, reduction='none').sum(1)
+            # print("cost_verb shape: ", cost_verb.shape)
+            cost_bbox = torch.cdist(pred_sub_boxes, tgt_sub_boxes, p=1).to(self.device) + torch.cdist(pred_obj_boxes, tgt_obj_boxes, p=1).to(self.device)
+            cost_giou = 1 - generalized_box_iou(pred_sub_boxes, box_cxcywh_to_xyxy(tgt_sub_boxes)).to(self.device) + \
+                        1 - generalized_box_iou(pred_obj_boxes, box_cxcywh_to_xyxy(tgt_obj_boxes)).to(self.device)
+            # print("cost_bbox shape: ", cost_bbox.shape)
+            # print("cost_giou shape: ", cost_giou.shape)
+            # 整合成本
+            C = self.cost_obj_class * cost_class + self.cost_verb_class * cost_verb + self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
+            C = C.cpu()
+            # print("C shape: ", C.shape)
+            # 使用匈牙利算法进行匹配
+            sub_ind, obj_ind = linear_sum_assignment(C.numpy())
+            all_indices.append((sub_ind, obj_ind))
+
+        return all_indices
 
 class HungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
@@ -146,6 +201,12 @@ class HungarianMatcherHOI(nn.Module):
 
     @torch.no_grad()
     def forward(self, outputs, targets, return_cost = False):
+        print("outputs['pred_obj_logits']: ", outputs['pred_obj_logits'].shape)
+        print("outputs['pred_sub_logits']: ", outputs['pred_sub_logits'].shape)
+        print("outputs['pred_verb_logits']: ", outputs['pred_verb_logits'].shape)
+        print("outputs['pred_sub_boxes']: ", outputs['pred_sub_boxes'].shape)
+        print("outputs['pred_obj_boxes']: ", outputs['pred_obj_boxes'].shape)
+        
         if self.subject_class:
             bs, num_queries = outputs['pred_obj_logits'].shape[:2]
 

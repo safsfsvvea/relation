@@ -328,6 +328,9 @@ class HICODetection_det(torch.utils.data.Dataset):
         detection['boxes'] = torch.tensor(detection_boxes, dtype=torch.float32) if detection_boxes else torch.tensor([], dtype=torch.float32).reshape(0, 4)
         detection['labels'] = torch.tensor(detection_labels, dtype=torch.int64) if detection_labels else torch.tensor([], dtype=torch.int64)
         detection['scores'] = torch.tensor(detection_scores, dtype=torch.float32) if detection_scores else torch.tensor([], dtype=torch.float32)
+        # if not (detection['labels'] < 80).all():
+        #     raise ValueError("Detection labels should be less than or equal to 80.")
+
         # make sure that #queries are more than #bboxes
         if self.img_set == 'train' and len(img_anno['annotations']) > self.num_queries:
             img_anno['annotations'] = img_anno['annotations'][:self.num_queries]
@@ -437,7 +440,21 @@ class HICODetection_det(torch.utils.data.Dataset):
                 # if len(self._valid_verb_ids.index(hoi['category_id'])) >=2:
                 #     print(self._valid_verb_ids.index(hoi['category_id']))
             target['hois'] = torch.as_tensor(hois, dtype=torch.int64)
-
+        # print("----------------------")
+        # print("target['sub_boxes'] shape: ", target['sub_boxes'].shape)
+        # print("target['obj_boxes'] shape: ", target['obj_boxes'].shape)
+        # print("target['labels']: ", target['labels'])
+        # print("target['labels'] shape: ", target['labels'].shape)
+        # print("target['obj_labels']: ", target['obj_labels'])
+        # print("target['obj_labels'] shape: ", target['obj_labels'].shape)
+        # print("target['verb_labels']: ", target['verb_labels'])
+        # print("target['verb_labels'] shape: ", target['verb_labels'].shape)
+        # print("target['sub_labels']: ", target['sub_labels'])
+        # print("target['sub_labels'] shape: ", target['sub_labels'].shape)
+        # print("target['obj_classes']: ", target['obj_classes'])
+        # print("----------------------")
+        if not (target['labels'] < 80).all():
+            raise ValueError("target labels should be less than or equal to 80.")
         return img, target, detection
 
     def set_rare_hois(self, anno_file):
@@ -594,7 +611,7 @@ class HICODetectionhm(torch.utils.data.Dataset):
         else:
             classes = [self._valid_obj_ids.index(obj['category_id']) for obj in img_anno['annotations']]
         classes = torch.tensor(classes, dtype=torch.int64)
-        print("classes: ", classes)
+
         target = {}
         target['orig_size'] = torch.as_tensor([int(h), int(w)])
         target['size'] = torch.as_tensor([int(h), int(w)])

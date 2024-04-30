@@ -63,10 +63,10 @@ class DenoisingVitBackbone(nn.Module):
         # mask = nested_tensor.mask
         img, scales = self.get_transform(img)
         img = img.to(self.device)
-        with torch.no_grad():
-            features = self.model(img)
-            raw_features = features['raw_vit_feats']
-            denoised_features = features['pred_denoised_feats']
+        features = self.model(img)
+        raw_features = features['raw_vit_feats']
+        denoised_features = features['pred_denoised_feats']
+        # print(denoised_features.requires_grad, raw_features.requires_grad)
         return denoised_features, raw_features, scales
 
     def extract_features(self, img_path):

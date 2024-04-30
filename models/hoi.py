@@ -84,7 +84,7 @@ class HOIModel(nn.Module):
                 # y2 = max(0, min(y2, h))
 
                 if y2 <= y1 or x2 <= x1:  # 检查是否有效
-                    print("Invalid bbox scaled:", x1, y1, x2, y2)
+                    # print("Invalid bbox scaled:", x1, y1, x2, y2)
                     continue
                 if y2 > h or y1 < 0 or x1 < 0 or x2 > w:  # 检查是否超出范围
                     print("Bbox scaled out of range:", x1, y1, x2, y2)
@@ -98,9 +98,9 @@ class HOIModel(nn.Module):
                     continue
                 # print("obj_feature: ", obj_feature.shape)
                 if det['category_id'] == self.person_category_id:
-                    human_features.append((obj_feature, det['score'], det['category_id']))
+                    human_features.append((obj_feature, det['score'], det['category_id'], det['bbox']))
                 else:
-                    objects_features.append((obj_feature, det['score'], det['category_id']))
+                    objects_features.append((obj_feature, det['score'], det['category_id'], det['bbox']))
 
             # Sort and limit the number of humans and objects if num_objects is set
             human_features.sort(key=lambda x: -x[1])
@@ -121,8 +121,10 @@ class HOIModel(nn.Module):
                     hoi_results.append({
                         'subject_category': human[2],
                         'subject_score': human[1],
+                        'subject_bbox': human[3],
                         'object_category': obj[2],
-                        'object_score': obj[1]
+                        'object_score': obj[1],
+                        'object_bbox': obj[3],
                     })
                     current_index += 1
         # print("all_pairs[0]: ", all_pairs[0].shape)
@@ -153,7 +155,8 @@ class HOIModel(nn.Module):
         for i, score in enumerate(relation_scores):
             # print("score: ", score.shape)
             # print("score: ", score)
-            hoi_results[i]['relation_score'] = score.cpu().detach().numpy()
+            # hoi_results[i]['relation_score'] = score.cpu().detach().numpy()
+            hoi_results[i]['relation_score'] = score
             # print("hoi_results[i]['relation_score']: ", hoi_results[i]['relation_score'])
         # Organize results per image
         image_hoi_results  = []
@@ -170,4 +173,65 @@ class HOIModel(nn.Module):
         # print("image_hoi_results: ", image_hoi_results)
         return image_hoi_results 
 
+class CriterionHOI(nn.Module):
+    def __init__(self, matcher, device, alpha=0.25, gamma=2.0):
+        super().__init__()
+        self.matcher = matcher
+        self.device = device
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, outputs, targets):
+        """
+        计算模型输出与目标之间的Focal Loss。
+        Args:
+            outputs (list): 模型输出的列表，每个元素包含该图像的所有人物-物体对的预测。
+            targets (list): 目标列表，每个元素包含该图像的真实标签信息。
+        
+        Returns:
+            torch.Tensor: 该批次的平均Focal Loss。
+        """
+        # 使用匹配器找到最优匹配
+        matched_indices = self.matcher(outputs, targets)
+        
+        batch_loss = 0.0
+        num_processed = 0  # 记录参与损失计算的图像数
+
+        for idx, (pred, tgt) in enumerate(zip(outputs, targets)):
+            if len(pred) == 0:
+                # 如果当前图像没有预测结果，跳过此图像的损失计算
+                continue
+
+            sub_inds, obj_inds = matched_indices[idx]
+            if len(sub_inds) == 0 or len(obj_inds) == 0:
+                # 如果没有有效匹配，也跳过此图像
+                continue
+
+            matched_pred_verb_scores = []
+            matched_tgt_verb_labels = []
+
+            for sub_idx, obj_idx in zip(sub_inds, obj_inds):
+                # 收集所有匹配对的预测logits和目标labels
+                matched_pred_verb_scores.append(pred[sub_idx]['relation_score'])
+                matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx])
+
+            if matched_pred_verb_scores:
+                # matched_pred_verb_scores = torch.stack(matched_pred_verb_scores)
+                # matched_tgt_verb_labels = torch.stack(matched_tgt_verb_labels)
+                matched_pred_verb_scores = torch.stack([tensor for tensor in matched_pred_verb_scores]).requires_grad_(True)
+                matched_tgt_verb_labels = torch.stack([torch.tensor(arr, device=self.device) for arr in matched_tgt_verb_labels]) #.requires_grad_(True)
+                # 计算Focal Loss
+                loss = self.focal_loss(matched_pred_verb_scores, matched_tgt_verb_labels)
+                batch_loss += loss
+                num_processed += 1
+        if batch_loss == 0.0:
+            batch_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        return batch_loss / max(num_processed, 1)  # 避免除以零
+
+    def focal_loss(self, inputs, targets):
+        """ 计算Focal Loss，用于处理类别不平衡问题 """
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        probas = torch.sigmoid(inputs)
+        loss = self.alpha * (1 - probas) ** self.gamma * bce_loss
+        return loss.mean()
     

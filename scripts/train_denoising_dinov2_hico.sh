@@ -19,7 +19,9 @@ python main.py \
     --num_queries 200 \
     --relation_threshold 0.20 \
     --num_workers 1 \
-    --batch_size 2
+    --batch_size 16 \
+    --use_correct_subject_category_hico \
+    --epochs 20 \
     # --load_backbone supervised \
     # --backbone DINOv2 \
     # --set_cost_bbox 2.5 \
