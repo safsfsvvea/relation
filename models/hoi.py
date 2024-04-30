@@ -149,7 +149,7 @@ class HOIModel(nn.Module):
             #         hoi_results[i] = None
         else:
             # relation_scores = torch.empty(0, 117, device=images.device)
-            print("No valid pairs formed.")
+            # print("No valid pairs formed.")
             return [[] for _ in range(batch_size)]  # Return a list of empty lists, one per image in batch
         # hoi_results = [result for result in hoi_results if result is not None]
         for i, score in enumerate(relation_scores):
