@@ -201,11 +201,11 @@ class HungarianMatcherHOI(nn.Module):
 
     @torch.no_grad()
     def forward(self, outputs, targets, return_cost = False):
-        print("outputs['pred_obj_logits']: ", outputs['pred_obj_logits'].shape)
-        print("outputs['pred_sub_logits']: ", outputs['pred_sub_logits'].shape)
-        print("outputs['pred_verb_logits']: ", outputs['pred_verb_logits'].shape)
-        print("outputs['pred_sub_boxes']: ", outputs['pred_sub_boxes'].shape)
-        print("outputs['pred_obj_boxes']: ", outputs['pred_obj_boxes'].shape)
+        # print("outputs['pred_obj_logits']: ", outputs['pred_obj_logits'].shape)
+        # print("outputs['pred_sub_logits']: ", outputs['pred_sub_logits'].shape)
+        # print("outputs['pred_verb_logits']: ", outputs['pred_verb_logits'].shape)
+        # print("outputs['pred_sub_boxes']: ", outputs['pred_sub_boxes'].shape)
+        # print("outputs['pred_obj_boxes']: ", outputs['pred_obj_boxes'].shape)
         
         if self.subject_class:
             bs, num_queries = outputs['pred_obj_logits'].shape[:2]

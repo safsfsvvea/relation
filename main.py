@@ -1,8 +1,8 @@
 from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
-from models.hoi import HOIModel, CriterionHOI
+from models.hoi import HOIModel, CriterionHOI, PostProcessHOI
 from models.matcher import HungarianMatcherHOI_det
-from engine import train_one_epoch
+from engine import train_one_epoch, evaluate_hoi
 import datasets
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset, BatchIterativeDistributedSampler
@@ -10,7 +10,7 @@ from datasets import build_dataset, get_coco_api_from_dataset, BatchIterativeDis
 #         evaluate_sgg_with_text
 import json       
 import argparse
-import datetime
+from datetime import datetime
 import json
 import random
 import time
@@ -20,6 +20,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
+import os
 
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
@@ -217,7 +218,7 @@ def get_args_parser():
     parser.add_argument('--pos_neg_ratio', default=0.5, type=float,
                         help="box noise scale to shift and scale")
     parser.add_argument('--relation_threshold', default=0., type=float,
-                        help="This is used in the class MixedRelDetection.")
+                        help="This is used in the postprocessor.")
     parser.add_argument('--pair_overlap', default=False, action='store_true', 
                         help = "Whether to use 'overlap' as prior knowledge to filter relations.")
     parser.add_argument(
@@ -482,6 +483,12 @@ def get_args_parser():
     
     return parser
 
+def save_checkpoint(state, filename="checkpoint.pth.tar"):
+    torch.save(state, filename)
+
+def ensure_dir(directory):
+    if not os.path.exists(directory):
+        os.makedirs(directory)
 
 def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -498,10 +505,18 @@ def main(args):
         cost_bbox=args.set_cost_bbox,
         cost_giou=args.set_cost_giou
     )
-    criterion = CriterionHOI(matcher=matcher, device=device)
+    criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
                                   weight_decay=args.weight_decay)
     print("Number of parameters in optimizer:", len(list(optimizer.param_groups[0]['params'])))
+    postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
+    if args.pretrained:
+        print(f"Loading pretrained model from {args.pretrained}")
+        checkpoint = torch.load(args.pretrained, map_location='cpu')
+        model.load_state_dict(checkpoint['state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        start_epoch = checkpoint['epoch']
+        print(f"Loaded checkpoint from epoch {start_epoch}")
     image_set_key = 'train'
 
     dataset_train = build_dataset(image_set = image_set_key, args=args)
@@ -524,12 +539,37 @@ def main(args):
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
-
+    # we do not need eval during pretraining.
+    dataset_val = build_dataset(image_set='val', args=args)
+    # if args.distributed:
+    #     print("it is here val!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    #     sampler_val = DistributedSampler(dataset_val, shuffle=False)
+    # else:
+    print("it is here val, not distributed!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
+                    drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+    ensure_dir(args.output_dir)
+    if args.hoi and args.eval:
+        test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
+        return
+    
     tensorboard_writer = SummaryWriter(log_dir='logs')
     num_epochs = args.epochs
     start_time = time.time()
     for epoch in range(num_epochs):
         train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
+        current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
+        checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
+        save_checkpoint({
+            'epoch': epoch + 1,
+            'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'loss': train_loss,
+        }, filename=checkpoint_filename)
+        
+        print(f"Checkpoint saved to {checkpoint_filename}")
     elapsed_time = time.time() - start_time
     print(f"Training completed in {elapsed_time:.2f} seconds")
     tensorboard_writer.close()

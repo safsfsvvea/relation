@@ -432,7 +432,7 @@ class HICODetection_det(torch.utils.data.Dataset):
             
 
             if self._transforms is not None:
-                img, _ = self._transforms(img, None)
+                img, _, detection = self._transforms(img, None, detection)
 
             hois = []
             for hoi in img_anno['hoi_annotation']:
@@ -794,8 +794,8 @@ def make_hico_det_transforms(image_set):
         ])
 
     if image_set == 'val':
-        return T.Compose([
-            T.RandomResize([800], max_size=1333),
+        return T_det.Compose([
+            T_det.RandomResize([800], max_size=1333),
             normalize,
         ])
 

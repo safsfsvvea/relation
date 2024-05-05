@@ -8,7 +8,7 @@ __pycache__/
 build/
 checkpoints/
 data/
-result/
+results/
 logs/
 # 忽略根目录下的 TODO 文件，不会忽略 subdir/TODO
 /TODO

@@ -2,8 +2,14 @@ import time
 import torch
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+import util.misc as utils
+import itertools
+from datasets.hico_eval import HICOEvaluator
+import numpy as np
+import copy
 
 def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
+    # TODO: 优化成RLIP的样子
     model.train()
     start_time = time.time()
     epoch_loss = 0.0
@@ -19,6 +25,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, pri
         out = model(images, targets, detections)
         if not all(len(output) == 0 for output in out):
             loss = criterion(out, targets)
+            # print(loss)
             loss.backward()
             optimizer.step()
         else:
@@ -42,3 +49,78 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, pri
     print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average loss: {epoch_loss / num_batches:.4f}")
     
     return epoch_loss / num_batches
+
+@torch.no_grad()
+def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_category_id, device, args):
+    model.eval()
+
+    metric_logger = utils.MetricLogger(delimiter="  ")
+    header = 'Test:'
+
+    preds = []
+    gts = []
+    indices = []
+    # filename_list = []
+    print_freq = 500
+    for samples, targets, detections in metric_logger.log_every(data_loader, print_freq, header):
+        # targets: tuple, len(tuple) = batch_size
+        #          element in tuple: a dict, whose keys are ['orig_size', 'size', 'boxes', 'labels', 'id', 'hois']
+                 
+        # print(targets[0]['orig_size'])
+        # print(targets[0]['size'])
+        # print('')
+        samples = samples.to(device)
+
+        outputs = model(samples, targets, detections)
+        
+        results = postprocessors(outputs, targets)
+        # print(results)
+        # print(len(list(itertools.chain.from_iterable(utils.all_gather(results)))))
+        # print(list(itertools.chain.from_iterable(utils.all_gather(results)))[0])
+        
+        # preds: merge predicted batch data
+        preds.extend(list(itertools.chain.from_iterable(utils.all_gather(results))))
+        # For avoiding a runtime error, the copy is used
+        # gts: merge ground truth batch data
+        gts.extend(list(itertools.chain.from_iterable(utils.all_gather(copy.deepcopy(targets)))))
+        
+        break
+        # # Add for evaluation
+        # filename_list += [t['filename'] for t in targets]
+
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+
+    img_ids = [img_gts['id'] for img_gts in gts]
+    _, indices = np.unique(img_ids, return_index=True)
+    preds = [img_preds for i, img_preds in enumerate(preds) if i in indices]
+    gts = [img_gts for i, img_gts in enumerate(gts) if i in indices]
+    print("len(preds): ", len(preds))
+    print("-----------------")
+    print("preds[0]: ", preds[0])
+    print("preds[0]['labels']: ", preds[0]['labels'].shape)
+    print("preds[0]['boxes']: ", preds[0]['boxes'].shape)
+    print("preds[0]['verb_scores']: ", preds[0]['verb_scores'].shape)
+    print("preds[0]['sub_ids']: ", preds[0]['sub_ids'].shape)
+    print("preds[0]['obj_ids']: ", preds[0]['obj_ids'].shape)
+    print("-----------------")
+    print("-----------------")
+    print("preds[1]: ", preds[1])
+    print("preds[1]['labels']: ", preds[1]['labels'].shape)
+    print("preds[1]['boxes']: ", preds[1]['boxes'].shape)
+    print("preds[1]['verb_scores']: ", preds[1]['verb_scores'].shape)
+    print("preds[1]['sub_ids']: ", preds[1]['sub_ids'].shape)
+    print("preds[1]['obj_ids']: ", preds[1]['obj_ids'].shape)
+    print("-----------------")
+    print("len(gts): ", len(gts))
+    print("gts[0]: ", gts[0])
+    
+    if dataset_file == 'hico' or dataset_file == 'hico_det':
+        evaluator = HICOEvaluator(preds, gts, subject_category_id, data_loader.dataset.rare_triplets,
+                                  data_loader.dataset.non_rare_triplets, data_loader.dataset.correct_mat, args)
+    # elif dataset_file == 'vcoco':
+    #     evaluator = VCOCOEvaluator(preds, gts, subject_category_id, data_loader.dataset.correct_mat, args)
+
+    stats = evaluator.evaluate()
+    print("stats: ", stats) 
+    return stats

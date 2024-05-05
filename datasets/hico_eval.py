@@ -37,36 +37,39 @@ class HICOEvaluator():
 
         self.preds = []
         for index, img_preds in enumerate(preds):
-            img_preds = {k: v.to('cpu').numpy() for k, v in img_preds.items()}
-            bboxes = [{'bbox': bbox, 'category_id': label} for bbox, label in zip(img_preds['boxes'], img_preds['labels'])]
-            hoi_scores = img_preds['verb_scores'] # [100, 117]
-            verb_labels = np.tile(np.arange(hoi_scores.shape[1]), (hoi_scores.shape[0], 1))
-            # print(verb_labels)
-            
-            subject_ids = np.tile(img_preds['sub_ids'], (hoi_scores.shape[1], 1)).T
-            object_ids = np.tile(img_preds['obj_ids'], (hoi_scores.shape[1], 1)).T
+            if img_preds:
+                img_preds = {k: v.to('cpu').numpy() for k, v in img_preds.items()}
+                bboxes = [{'bbox': bbox, 'category_id': label} for bbox, label in zip(img_preds['boxes'], img_preds['labels'])]
+                hoi_scores = img_preds['verb_scores'] # [100, 117]
+                verb_labels = np.tile(np.arange(hoi_scores.shape[1]), (hoi_scores.shape[0], 1))
+                # print(verb_labels)
+                
+                subject_ids = np.tile(img_preds['sub_ids'], (hoi_scores.shape[1], 1)).T
+                object_ids = np.tile(img_preds['obj_ids'], (hoi_scores.shape[1], 1)).T
 
-            hoi_scores = hoi_scores.ravel()  # [100*117,]
-            verb_labels = verb_labels.ravel()
-            subject_ids = subject_ids.ravel()
-            object_ids = object_ids.ravel()
+                hoi_scores = hoi_scores.ravel()  # [100*117,]
+                verb_labels = verb_labels.ravel()
+                subject_ids = subject_ids.ravel()
+                object_ids = object_ids.ravel()
 
-            if len(subject_ids) > 0:
-                object_labels = np.array([bboxes[object_id]['category_id'] for object_id in object_ids])
-                masks = correct_mat[verb_labels, object_labels]  # [11700, ]
-                hoi_scores *= masks
-                # The above step filters the hois that are in the correct map, 
-                # otherwise the score will be multiplied to zero. 
+                if len(subject_ids) > 0:
+                    object_labels = np.array([bboxes[object_id]['category_id'] for object_id in object_ids])
+                    masks = correct_mat[verb_labels, object_labels]  # [11700, ]
+                    hoi_scores *= masks
+                    # The above step filters the hois that are in the correct map, 
+                    # otherwise the score will be multiplied to zero. 
 
-                hois = [{'subject_id': subject_id, 'object_id': object_id, 'category_id': category_id, 'score': score} for
-                        subject_id, object_id, category_id, score in zip(subject_ids, object_ids, verb_labels, hoi_scores)]
-                # len of hois: [11700,]
-                hois.sort(key=lambda k: (k.get('score', 0)), reverse=True)  # get(key, default)
-                # Sort the list of dicts according to the value of the 'score'
-                hois = hois[:self.max_hois]
+                    hois = [{'subject_id': subject_id, 'object_id': object_id, 'category_id': category_id, 'score': score} for
+                            subject_id, object_id, category_id, score in zip(subject_ids, object_ids, verb_labels, hoi_scores)]
+                    # len of hois: [11700,]
+                    hois.sort(key=lambda k: (k.get('score', 0)), reverse=True)  # get(key, default)
+                    # Sort the list of dicts according to the value of the 'score'
+                    hois = hois[:self.max_hois]
+                else:
+                    hois = []
             else:
                 hois = []
-
+                bboxes = []
             filename = gts[index]['filename']
             self.preds.append({
                 'filename':filename,
