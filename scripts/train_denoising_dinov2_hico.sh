@@ -14,16 +14,18 @@
 python main.py \
     --hoi_path /cluster/home/clin/clin/RLIPv2/data/hico_20160224_det \
     --hico_det_file /cluster/home/clin/clin/RLIPv2/data/hico_20160224_det/internimage/hico_det.json \
-    --output_dir /cluster/home/clin/clin/relation/results/test1 \
+    --output_dir /cluster/home/clin/clin/relation/results/50 \
     --hoi \
     --dataset_file hico_det \
     --num_queries 200 \
     --relation_threshold 0.20 \
     --num_workers 8 \
-    --batch_size 8 \
+    --batch_size 4 \
     --use_correct_subject_category_hico \
-    --epochs 20 \
+    --epochs 100 \
     --verb_loss_type bce \
+    --subset_size 100 \
+    --do_cross_validation
     # --load_backbone supervised \
     # --backbone DINOv2 \
     # --set_cost_bbox 2.5 \

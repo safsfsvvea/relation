@@ -4,6 +4,7 @@ from models.hoi import HOIModel, CriterionHOI, PostProcessHOI
 from models.matcher import HungarianMatcherHOI_det
 from engine import train_one_epoch, evaluate_hoi
 import datasets
+from datasets.hico import CustomSubset
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset, BatchIterativeDistributedSampler
 # from engine import evaluate, train_one_epoch, evaluate_hoi, evaluate_hoi_with_text, evaluate_hoi_with_text_matching_uniformity, \
@@ -21,6 +22,8 @@ import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 import os
+from torch.utils.data import Subset
+from sklearn.model_selection import KFold
 
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
@@ -422,6 +425,10 @@ def get_args_parser():
     
 
     # dataset parameters
+    parser.add_argument('--num_folds', default=5, type=int, help='Number of folds for cross validation')
+    parser.add_argument('--do_cross_validation', action='store_true', help='Use cross validation')
+    parser.add_argument('--subset_size', default=0, type=int, help='Number of samples to use for training; 0 means use the whole dataset')
+    parser.add_argument('--random_subset', action='store_true', help='Select a random subset of the dataset')
     parser.add_argument('--dataset_file', default='coco')
     parser.add_argument('--coco_path', type=str)
     parser.add_argument('--coco_panoptic_path', type=str)
@@ -520,6 +527,19 @@ def main(args):
     image_set_key = 'train'
 
     dataset_train = build_dataset(image_set = image_set_key, args=args)
+    if args.do_cross_validation:
+        dataset_val = build_dataset(image_set='trainset_val', args=args)
+        # args.rare_triplets = dataset_val.dataset.rare_triplets
+    else:
+        dataset_val = build_dataset(image_set='val', args=args)
+    if args.subset_size > 0:
+        if args.random_subset:
+            subset_indices = np.random.choice(len(dataset_train), args.subset_size, replace=False)
+        else:
+            subset_indices = list(range(min(args.subset_size, len(dataset_train))))
+        dataset_train = CustomSubset(dataset_train, subset_indices)
+        dataset_val = CustomSubset(dataset_val, subset_indices)
+        
     if args.iterative_paradigm is None:
         # if args.distributed:
         #     sampler_train = DistributedSampler(dataset_train)
@@ -535,44 +555,104 @@ def main(args):
                                                                args.batch_size,
                                                                args.iterative_paradigm,
                                                                drop_last=False)
-    # print("batch_sampler_train: ", batch_sampler_train)
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
+    
     # we do not need eval during pretraining.
-    dataset_val = build_dataset(image_set='val', args=args)
+    
+    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
+                    drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+    
     # if args.distributed:
     #     print("it is here val!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
     #     sampler_val = DistributedSampler(dataset_val, shuffle=False)
     # else:
-    print("it is here val, not distributed!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                    drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-    ensure_dir(args.output_dir)
-    if args.hoi and args.eval:
-        test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
-        return
-    
-    tensorboard_writer = SummaryWriter(log_dir='logs')
-    num_epochs = args.epochs
-    start_time = time.time()
-    for epoch in range(num_epochs):
-        train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
-        current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
-        checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
-        save_checkpoint({
-            'epoch': epoch + 1,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'loss': train_loss,
-        }, filename=checkpoint_filename)
+    if args.do_cross_validation:
+        # 使用交叉验证
+        kf = KFold(n_splits=args.num_folds, shuffle=True, random_state=42)
+        results1 = []
+        results2 = []
+
+        for fold, (train_idx, val_idx) in enumerate(kf.split(dataset_train)):
+            train_subset = CustomSubset(dataset_train, train_idx)
+            val_subset1 = CustomSubset(dataset_val, val_idx)
+            val_subset2 = CustomSubset(dataset_val, train_idx)
+            
+            sampler_train = torch.utils.data.RandomSampler(train_subset)
+            batch_sampler_train = torch.utils.data.BatchSampler(
+                sampler_train, args.batch_size, drop_last=True)
+            
+            train_loader = DataLoader(train_subset, batch_sampler=batch_sampler_train,
+                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
+            
+            sampler_val1 = torch.utils.data.SequentialSampler(val_subset1)
+            val_loader1 = DataLoader(val_subset1, args.batch_size, sampler=sampler_val1,
+                        drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+            sampler_val2 = torch.utils.data.SequentialSampler(val_subset2)
+            val_loader2 = DataLoader(val_subset2, args.batch_size, sampler=sampler_val2,
+                        drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+
+            # 重新初始化模型和优化器以避免泄露前一轮的信息
+            model = HOIModel(backbone, device=device)
+            matcher = HungarianMatcherHOI_det(
+                device=device,
+                cost_obj_class=args.set_cost_obj_class,
+                cost_verb_class=args.set_cost_verb_class,
+                cost_bbox=args.set_cost_bbox,
+                cost_giou=args.set_cost_giou
+            )
+            criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
+            optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
+                                        weight_decay=args.weight_decay)
+            postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
+
+            print(f"Starting fold {fold+1}/{args.num_folds}")
+            for epoch in range(args.epochs):
+                train_loss = train_one_epoch(model, criterion, optimizer, train_loader, device, epoch)
+                # 这里可以添加验证逻辑和TensorBoard记录
+
+            # 评估这个折叠
+            test_stats1 = evaluate_hoi(args.dataset_file, model, postprocessors, val_loader1, args.subject_category_id, device, args)
+            test_stats2 = evaluate_hoi(args.dataset_file, model, postprocessors, val_loader2, args.subject_category_id, device, args)
+            results1.append(test_stats1['mAP'])
+            results2.append(test_stats2['mAP'])
+            
+            print(f"Fold {fold+1} mAP val: {test_stats1['mAP']}")
+            print(f"Fold {fold+1} mAP train: {test_stats2['mAP']}")
+
+        print("Cross-validation val results:", results1)
+        print("Mean AP across val folds:", np.mean(results1))
         
-        print(f"Checkpoint saved to {checkpoint_filename}")
-    elapsed_time = time.time() - start_time
-    print(f"Training completed in {elapsed_time:.2f} seconds")
-    tensorboard_writer.close()
+        print("Cross-validation train results:", results2)
+        print("Mean AP across train folds:", np.mean(results2))
+    else:
+        
+        ensure_dir(args.output_dir)
+        if args.hoi and args.eval:
+            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
+            return
+        
+        tensorboard_writer = SummaryWriter(log_dir='logs')
+        num_epochs = args.epochs
+        start_time = time.time()
+        for epoch in range(num_epochs):
+            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
+            current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
+            checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'state_dict': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'loss': train_loss,
+            }, filename=checkpoint_filename)
+            
+            print(f"Checkpoint saved to {checkpoint_filename}")
+        elapsed_time = time.time() - start_time
+        print(f"Training completed in {elapsed_time:.2f} seconds")
+        tensorboard_writer.close()
 
     # for images, targets, detections in data_loader_train:
     #     images = images.to(device)

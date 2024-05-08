@@ -182,8 +182,8 @@ class PostProcessHOI(nn.Module):
                 if max_prob.item() >= self.relation_threshold:
                     # 更新列表和字典
                     
-                    subject_labels.append(hoi['subject_category'])
-                    object_labels.append(hoi['object_category'])
+                    subject_labels.append(hoi['subject_category']-1)
+                    object_labels.append(hoi['object_category']-1)
                     
                     subject_box = torch.tensor(hoi['subject_bbox'], device=self.device) * torch.tensor([scale_w, scale_h, scale_w, scale_h], device=self.device)
                     object_box = torch.tensor(hoi['object_bbox'], device=self.device) * torch.tensor([scale_w, scale_h, scale_w, scale_h], device=self.device)

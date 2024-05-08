@@ -29,6 +29,19 @@ import cv2
 import os
 import math
 
+class CustomSubset(torch.utils.data.Dataset):
+    def __init__(self, dataset, indices):
+        self.dataset = dataset
+        self.indices = indices
+
+    def __getitem__(self, idx):
+        return self.dataset[self.indices[idx]]
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getattr__(self, attr):
+        return getattr(self.dataset, attr)
 
 class HICODetection(torch.utils.data.Dataset):
     def __init__(self, img_set, img_folder, anno_file, transforms, num_queries, args = None):
@@ -798,7 +811,12 @@ def make_hico_det_transforms(image_set):
             T_det.RandomResize([800], max_size=1333),
             normalize,
         ])
-
+    
+    if image_set == 'trainset_val':
+        return T_det.Compose([
+            T_det.RandomResize([800], max_size=1333),
+            normalize,
+        ])
     raise ValueError(f'unknown {image_set}')
 
 def save_image_tensor2cv2(input_tensor: torch.Tensor, filename):
@@ -855,7 +873,10 @@ def build(image_set, args):
     }
     CORRECT_MAT_PATH = root / 'annotations' / 'corre_hico.npy'
 
-    img_folder, anno_file = PATHS[image_set]
+    if image_set == 'trainset_val':
+        img_folder, anno_file = PATHS['train']
+    else:
+        img_folder, anno_file = PATHS[image_set]
     if args.DETRHOIhm:
         dataset = HICODetectionhm(image_set, img_folder, anno_file, transforms=make_hico_transforms(image_set),
                                 num_queries=args.num_queries)
@@ -914,7 +935,7 @@ def build(image_set, args):
     #         dataset.remove_text_unseen(args.zero_shot_setting) 
 
 
-    if image_set == 'val':
+    if image_set == 'val' or image_set == 'trainset_val':
         if args.zero_shot_setting == None:
             anno_file_100percent = root / 'annotations' / 'trainval_hico.json'
             dataset.set_rare_hois(anno_file_100percent)

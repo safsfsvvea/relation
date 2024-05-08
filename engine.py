@@ -84,7 +84,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
         # gts: merge ground truth batch data
         gts.extend(list(itertools.chain.from_iterable(utils.all_gather(copy.deepcopy(targets)))))
         
-        break
+        # break
         # # Add for evaluation
         # filename_list += [t['filename'] for t in targets]
 
@@ -95,25 +95,6 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     _, indices = np.unique(img_ids, return_index=True)
     preds = [img_preds for i, img_preds in enumerate(preds) if i in indices]
     gts = [img_gts for i, img_gts in enumerate(gts) if i in indices]
-    print("len(preds): ", len(preds))
-    print("-----------------")
-    print("preds[0]: ", preds[0])
-    print("preds[0]['labels']: ", preds[0]['labels'].shape)
-    print("preds[0]['boxes']: ", preds[0]['boxes'].shape)
-    print("preds[0]['verb_scores']: ", preds[0]['verb_scores'].shape)
-    print("preds[0]['sub_ids']: ", preds[0]['sub_ids'].shape)
-    print("preds[0]['obj_ids']: ", preds[0]['obj_ids'].shape)
-    print("-----------------")
-    print("-----------------")
-    print("preds[1]: ", preds[1])
-    print("preds[1]['labels']: ", preds[1]['labels'].shape)
-    print("preds[1]['boxes']: ", preds[1]['boxes'].shape)
-    print("preds[1]['verb_scores']: ", preds[1]['verb_scores'].shape)
-    print("preds[1]['sub_ids']: ", preds[1]['sub_ids'].shape)
-    print("preds[1]['obj_ids']: ", preds[1]['obj_ids'].shape)
-    print("-----------------")
-    print("len(gts): ", len(gts))
-    print("gts[0]: ", gts[0])
     
     if dataset_file == 'hico' or dataset_file == 'hico_det':
         evaluator = HICOEvaluator(preds, gts, subject_category_id, data_loader.dataset.rare_triplets,
@@ -122,5 +103,26 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     #     evaluator = VCOCOEvaluator(preds, gts, subject_category_id, data_loader.dataset.correct_mat, args)
 
     stats = evaluator.evaluate()
-    print("stats: ", stats) 
+    
+    # print("len(preds): ", len(preds))
+    # if preds[0]:
+    #     print("-----------------")
+    #     print("preds[0]: ", preds[0])
+    #     print("preds[0]['labels']: ", preds[0]['labels'].shape)
+    #     print("preds[0]['boxes']: ", preds[0]['boxes'].shape)
+    #     print("preds[0]['verb_scores']: ", preds[0]['verb_scores'].shape)
+    #     print("preds[0]['sub_ids']: ", preds[0]['sub_ids'].shape)
+    #     print("preds[0]['obj_ids']: ", preds[0]['obj_ids'].shape)
+    #     print("-----------------")
+    # if preds[1]:
+    #     print("-----------------")
+    #     print("preds[1]: ", preds[1])
+    #     print("preds[1]['labels']: ", preds[1]['labels'].shape)
+    #     print("preds[1]['boxes']: ", preds[1]['boxes'].shape)
+    #     print("preds[1]['verb_scores']: ", preds[1]['verb_scores'].shape)
+    #     print("preds[1]['sub_ids']: ", preds[1]['sub_ids'].shape)
+    #     print("preds[1]['obj_ids']: ", preds[1]['obj_ids'].shape)
+    #     print("-----------------")
+    # print("len(gts): ", len(gts))
+    # print("gts[0]: ", gts[0]) 
     return stats
