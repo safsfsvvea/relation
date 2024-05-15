@@ -1,14 +1,8 @@
-from models.denoise_backbone import DenoisingVitBackbone
-from models.backbone import DINOv2Backbone
-from models.hoi import HOIModel, CriterionHOI, PostProcessHOI
-from models.matcher import HungarianMatcherHOI_det
-from engine import train_one_epoch, evaluate_hoi
+from engine import evaluate_det_hico
 import datasets
 from datasets.hico import CustomSubset
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset, BatchIterativeDistributedSampler
-# from engine import evaluate, train_one_epoch, evaluate_hoi, evaluate_hoi_with_text, evaluate_hoi_with_text_matching_uniformity, \
-#         evaluate_sgg_with_text
 import json       
 import argparse
 from datetime import datetime
@@ -20,13 +14,32 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-from torch.utils.tensorboard import SummaryWriter
 import os
 from torch.utils.data import Subset
-from sklearn.model_selection import KFold
+
+import sys
+import os
+from mmdet.apis import inference_detector, init_detector
+import mmcv
+
+# 计算当前文件的绝对路径，然后计算mmcv_custom所在目录的路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+internimage_path = os.path.join(current_dir, '../InternImage/detection')
+
+# 添加到sys.path
+sys.path.append(internimage_path)
+
+# 现在可以导入mmcv_custom
+import mmcv_custom
+import mmdet_custom
+from mmdet.apis import multi_gpu_test, single_gpu_test
+if 'mmcv_custom' in sys.modules:
+    print("mmcv_custom is loaded.")
+else:
+    print("mmcv_custom not loaded.")
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
+    parser = argparse.ArgumentParser('detection evaluation script', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
     parser.add_argument('--text_encoder_lr', default=5e-5, type=float)
@@ -500,198 +513,33 @@ def ensure_dir(directory):
 
 def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    backbone = DenoisingVitBackbone(
-        model_type="vit_base_patch14_dinov2.lvd142m", device=device,
-        denoised=True
-    )
-    # print(backbone)
-    model = HOIModel(backbone, device=device)
-    matcher = HungarianMatcherHOI_det(
-        device=device,
-        cost_obj_class=args.set_cost_obj_class,
-        cost_verb_class=args.set_cost_verb_class,
-        cost_bbox=args.set_cost_bbox,
-        cost_giou=args.set_cost_giou
-    )
-    criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
-                                  weight_decay=args.weight_decay)
-    print("Number of parameters in optimizer:", len(list(optimizer.param_groups[0]['params'])))
-    postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
-    if args.pretrained:
-        print(f"Loading pretrained model from {args.pretrained}")
-        checkpoint = torch.load(args.pretrained, map_location='cpu')
-        model.load_state_dict(checkpoint['state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        start_epoch = checkpoint['epoch']
-        print(f"Loaded checkpoint from epoch {start_epoch}")
-    image_set_key = 'train'
-
-    dataset_train = build_dataset(image_set = image_set_key, args=args)
-    if args.do_cross_validation:
-        dataset_val = build_dataset(image_set='trainset_val', args=args)
-        # args.rare_triplets = dataset_val.dataset.rare_triplets
-    else:
-        dataset_val = build_dataset(image_set='val', args=args)
-        # dataset_val = build_dataset(image_set='trainset_val', args=args)
+    
+   # 初始化模型
+    config_file = '/cluster/home/clin/clin/InternImage/detection/configs/coco/cascade_internimage_xl_fpn_3x_coco.py'
+    checkpoint_file = '/cluster/home/clin/clin/InternImage/checkpoints/det/cascade_internimage_xl_fpn_3x_coco.pth'
+    model = init_detector(config_file, checkpoint_file, device=device)
+    print("model: ", model)
+    dataset_val = build_dataset(image_set='val', args=args)
     if args.subset_size > 0:
-        print("args.index", args.index)
         if args.random_subset:
-            subset_indices = np.random.choice(len(dataset_train), args.subset_size, replace=False)
+            subset_indices = np.random.choice(len(dataset_val), args.subset_size, replace=False)
         elif args.index is not None:
-            print("args.index here!!!")
             subset_indices = [args.index]
         else:
-            subset_indices = list(range(min(args.subset_size, len(dataset_train))))
-        dataset_train = CustomSubset(dataset_train, subset_indices)
+            subset_indices = list(range(min(args.subset_size, len(dataset_val))))
         dataset_val = CustomSubset(dataset_val, subset_indices)
-        
-    if args.iterative_paradigm is None:
-        # if args.distributed:
-        #     sampler_train = DistributedSampler(dataset_train)
-        # else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        # print("it is here train!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-
-        batch_sampler_train = torch.utils.data.BatchSampler(
-            sampler_train, args.batch_size, drop_last=True)
-    else:
-        assert args.distributed
-        batch_sampler_train = BatchIterativeDistributedSampler(dataset_train,
-                                                               args.batch_size,
-                                                               args.iterative_paradigm,
-                                                               drop_last=False)
-    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
-
-    
-    # we do not need eval during pretraining.
     
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                     drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+    if args.output_dir:
+        ensure_dir(args.output_dir)
+    # outputs = single_gpu_test(model, data_loader_val)
+    accuracy = evaluate_det_hico(model, data_loader_val, device, args)
     
-    # if args.distributed:
-    #     print("it is here val!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    #     sampler_val = DistributedSampler(dataset_val, shuffle=False)
-    # else:
-    if args.do_cross_validation:
-        # 使用交叉验证
-        kf = KFold(n_splits=args.num_folds, shuffle=True, random_state=42)
-        results1 = []
-        results2 = []
-
-        for fold, (train_idx, val_idx) in enumerate(kf.split(dataset_train)):
-            train_subset = CustomSubset(dataset_train, train_idx)
-            val_subset1 = CustomSubset(dataset_val, val_idx)
-            val_subset2 = CustomSubset(dataset_val, train_idx)
-            
-            sampler_train = torch.utils.data.RandomSampler(train_subset)
-            batch_sampler_train = torch.utils.data.BatchSampler(
-                sampler_train, args.batch_size, drop_last=True)
-            
-            train_loader = DataLoader(train_subset, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
-            
-            sampler_val1 = torch.utils.data.SequentialSampler(val_subset1)
-            val_loader1 = DataLoader(val_subset1, args.batch_size, sampler=sampler_val1,
-                        drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-            sampler_val2 = torch.utils.data.SequentialSampler(val_subset2)
-            val_loader2 = DataLoader(val_subset2, args.batch_size, sampler=sampler_val2,
-                        drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-
-            # 重新初始化模型和优化器以避免泄露前一轮的信息
-            model = HOIModel(backbone, device=device)
-            matcher = HungarianMatcherHOI_det(
-                device=device,
-                cost_obj_class=args.set_cost_obj_class,
-                cost_verb_class=args.set_cost_verb_class,
-                cost_bbox=args.set_cost_bbox,
-                cost_giou=args.set_cost_giou
-            )
-            criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
-            optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
-                                        weight_decay=args.weight_decay)
-            postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
-
-            print(f"Starting fold {fold+1}/{args.num_folds}")
-            for epoch in range(args.epochs):
-                train_loss = train_one_epoch(model, criterion, optimizer, train_loader, device, epoch)
-                # 这里可以添加验证逻辑和TensorBoard记录
-
-            # 评估这个折叠
-            test_stats1 = evaluate_hoi(args.dataset_file, model, postprocessors, val_loader1, args.subject_category_id, device, args)
-            test_stats2 = evaluate_hoi(args.dataset_file, model, postprocessors, val_loader2, args.subject_category_id, device, args)
-            results1.append(test_stats1['mAP'])
-            results2.append(test_stats2['mAP'])
-            
-            print(f"Fold {fold+1} mAP val: {test_stats1['mAP']}")
-            print(f"Fold {fold+1} mAP train: {test_stats2['mAP']}")
-
-        print("Cross-validation val results:", results1)
-        print("Mean AP across val folds:", np.mean(results1))
-        
-        print("Cross-validation train results:", results2)
-        print("Mean AP across train folds:", np.mean(results2))
-    else:
-        if args.output_dir:
-            ensure_dir(args.output_dir)
-        if args.hoi and args.eval:
-            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
-            return
-        
-        tensorboard_writer = SummaryWriter(log_dir='logs')
-        num_epochs = args.epochs
-        start_time = time.time()
-        train_loss = 0
-        for epoch in range(num_epochs):
-            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
-            if args.output_dir and epoch % 10 == 0:
-                current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-                checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
-                checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'loss': train_loss,
-                }, filename=checkpoint_filename)
-                
-                print(f"Checkpoint saved to {checkpoint_filename}")
-        checkpoint_filename = f"checkpoint.pth.tar"
-        checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
-        save_checkpoint({
-            'epoch': num_epochs,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'loss': train_loss,
-        }, filename=checkpoint_filename)
-        
-        print(f"Checkpoint saved to {checkpoint_filename}")
-        
-        elapsed_time = time.time() - start_time
-        print(f"Training completed in {elapsed_time:.2f} seconds")
-        tensorboard_writer.close()
-
-    # for images, targets, detections in data_loader_train:
-    #     images = images.to(device)
-    #     targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
-    #     out = model(images, targets, detections)
-    #     # all_indices = matcher(out, targets)
-    #     # print("all_indices: ", all_indices)
-    #     loss = criterion(out, targets)
-    #     print("loss: ", loss)
-        # print("-----------------------------")
-        # print("out[0]: ", out[0])
-        # print("verb_labels[0]: ", targets[0]["verb_labels"])
-        # print("verb_labels shape[0]: ", targets[0]["verb_labels"].shape)
-        # print("targets['verb_classes'][0]: ", targets[0]['verb_classes'])
-        # # print("targets['verb_classes'] shape: ", targets[0]['verb_classes'].shape)
-        # print("-----------------------------")
-        # print(out)
     
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser('relation training and evaluation script', parents=[get_args_parser()])
+    parser = argparse.ArgumentParser('detection evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)

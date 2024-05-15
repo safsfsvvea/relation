@@ -2,8 +2,184 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from util.misc import NestedTensor
-
+import time
 class HOIModel(nn.Module):
+    def __init__(self, backbone, device, num_objects=10, feature_dim=768, person_category_id=1, patch_size=14):
+        super(HOIModel, self).__init__()
+        self.backbone = backbone
+        self.device = device
+        self.num_objects = num_objects
+        self.feature_dim = feature_dim
+        self.person_category_id = person_category_id
+        self.patch_size = patch_size
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * feature_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 117)  # Assuming 117 relation classes
+        )
+        self.to(self.device)
+    def forward(self, nested_tensor: NestedTensor , targets, detections_batch):
+        # print("targets[0]: ", targets[0])
+        images = nested_tensor.tensors
+        mask = nested_tensor.mask
+        backbone_start_time = time.time()
+        batch_denoised_features, _, scales = self.backbone(images)
+        backbone_time = time.time() - backbone_start_time
+        print("Backbone time: ", backbone_time)
+        
+        downsampling_start_time = time.time()
+        batch_denoised_features = batch_denoised_features.permute(0, 3, 1, 2)
+        batch_denoised_features = F.interpolate(batch_denoised_features, scale_factor=2, mode='bilinear', align_corners=True)
+        batch_denoised_features = batch_denoised_features.permute(0, 2, 3, 1)
+
+        downsampled_mask = F.interpolate(mask.unsqueeze(1).float(), size=(mask.shape[1] // self.patch_size * 2, mask.shape[2] // self.patch_size * 2), mode='nearest').bool().squeeze(1)
+
+        downsampling_time = time.time() - downsampling_start_time
+        print("Downsampling time: ", downsampling_time)
+        
+        batch_size = images.size(0)
+        all_pairs = []
+        pair_start_indices = []
+        hoi_results = []
+        current_index = 0
+        
+        for_start_time = time.time()
+        for b in range(batch_size):
+            H, W = targets[b]["size"]
+            input_detections = detections_batch[b]
+            detections = []
+            
+            detection_transfer_start_time = time.time()
+            boxes = input_detections['boxes']
+            if len(boxes) == 0:
+                print("No boxes found for this image.")
+                # continue
+            labels = input_detections['labels']
+            scores = input_detections['scores']
+            
+            for i, box in enumerate(boxes):
+                cx, cy, bw, bh = box
+                xmin = (cx - bw / 2) * W
+                ymin = (cy - bh / 2) * H
+                xmax = (cx + bw / 2) * W
+                ymax = (cy + bh / 2) * H
+                
+                detections.append({
+                    'category_id': labels[i].item(),
+                    'bbox': [xmin, ymin, xmax, ymax],
+                    'score': scores[i].item()
+                })
+            detection_transfer_time = time.time() - detection_transfer_start_time
+            print("Detection transfer time: ", detection_transfer_time)
+            
+            denoised_features = batch_denoised_features[b]
+            h, w, _ = denoised_features.shape
+            objects_features = []
+            human_features = []
+            
+            if len(detections) == 0: 
+                print("No detections found for this image.")
+                continue
+            # # Extract features for detected humans and objects
+            # bboxes = torch.tensor([det['bbox'] for det in detections], device=self.device)
+            # bboxes_scaled = (bboxes * torch.tensor(scales + scales, device=self.device).repeat((bboxes.size(0), 1)) / self.patch_size * 2).int()
+
+            for det in detections:
+                bbox = det['bbox']
+                a, b, c, d = bbox
+                bbox_scaled = [int(bbox[i] * scales[i % 2] / self.patch_size * 2) for i in range(4)]
+                x1, y1, x2, y2 = bbox_scaled
+                # 确保边界框不超出图像边界
+                # x1 = max(0, min(x1, w - 1))
+                # x2 = max(0, min(x2, w))
+                # y1 = max(0, min(y1, h - 1))
+                # y2 = max(0, min(y2, h))
+
+                if y2 <= y1 or x2 <= x1:  # 检查是否有效
+                    y2 = max(y2, y1 + 1)  # 确保边界框至少有1个像素的高度
+                    x2 = max(x2, x1 + 1)  # 确保边界框至少有1个像素的宽度
+                    print("Invalid bbox:", x1, y1, x2, y2)
+                if y2 > h or y1 < 0 or x1 < 0 or x2 > w:  # 检查是否超出范围
+                    print("Bbox scaled out of range:", x1, y1, x2, y2)
+                    print("feature shape:", h, w)
+                    print("Original bbox:", a, b, c, d)
+                    print("image shape:", H, W)
+                    continue
+                obj_feature = denoised_features[y1:y2, x1:x2, :].mean(dim=[0, 1])
+                if torch.isnan(obj_feature).any():
+                    print("NaN detected in obj_feature")
+                    continue
+
+                if det['category_id'] == self.person_category_id:
+                    human_features.append((obj_feature, det['score'], det['category_id'], det['bbox']))
+                else:
+                    objects_features.append((obj_feature, det['score'], det['category_id'], det['bbox']))
+            print("-----------------")
+            print("human_features: ", len(human_features))
+            print("objects_features: ", len(objects_features))
+            # Sort and limit the number of humans and objects if num_objects is set
+            human_features.sort(key=lambda x: -x[1])
+            objects_features.sort(key=lambda x: -x[1])
+            if self.num_objects is not None:
+                human_features = human_features[:self.num_objects]
+                objects_features = objects_features[:self.num_objects]
+
+            # Record the start index for this image's pairs
+            pair_start_indices.append(current_index)
+
+            # Generate all valid human-object pairs
+            for human in human_features:
+                for obj in objects_features:
+                    combined_feature = torch.cat([human[0], obj[0]], dim=0)
+                    # print("combined_feature: ", combined_feature.shape)
+                    all_pairs.append(combined_feature.unsqueeze(0))
+                    hoi_results.append({
+                        'subject_category': human[2],
+                        'subject_score': human[1],
+                        'subject_bbox': human[3],
+                        'object_category': obj[2],
+                        'object_score': obj[1],
+                        'object_bbox': obj[3],
+                    })
+                    current_index += 1
+            print("hoi_results: ", len(hoi_results))
+            print("-----------------")
+        for_time = time.time() - for_start_time
+        print("for loop time: ", for_time)
+        
+        if all_pairs:
+            mlp_start_time = time.time()
+            all_pairs_tensor = torch.cat(all_pairs, dim=0)
+            relation_scores = self.mlp(all_pairs_tensor)
+            mlp_time = time.time() - mlp_start_time
+            print("MLP time: ", mlp_time)
+            if torch.isnan(relation_scores).any():
+                    raise ValueError("NaN detected in relation_scores.")
+        else:
+            print("No pairs found for this batch.")
+            return [[] for _ in range(batch_size)]  # Return a list of empty lists, one per image in batch
+        
+        result_start_time = time.time()
+        for i, score in enumerate(relation_scores):
+            hoi_results[i]['relation_score'] = score
+        # Organize results per image
+        image_hoi_results  = []
+        for i in range(len(pair_start_indices)):
+            start_idx = pair_start_indices[i]
+            end_idx = pair_start_indices[i+1] if i+1 < len(pair_start_indices) else len(relation_scores)
+            if start_idx == end_idx:
+                # If there are no results for this image, append an empty list or a placeholder
+                image_hoi_results.append([])
+                print("No results found for this image.")
+            else:
+                image_hoi_results.append(hoi_results[start_idx:end_idx])
+        result_time = time.time() - result_start_time
+        print("Result time: ", result_time)
+        return image_hoi_results 
+
+class HOIModel_gt(nn.Module):
     def __init__(self, backbone, device, num_objects=10, feature_dim=768, person_category_id=1, patch_size=14):
         super(HOIModel, self).__init__()
         self.backbone = backbone
@@ -43,6 +219,9 @@ class HOIModel(nn.Module):
             input_detections = detections_batch[b]
             detections = []
             boxes = input_detections['boxes']
+            if len(boxes) == 0:
+                print("No boxes found for this image.")
+                # continue
             labels = input_detections['labels']
             scores = input_detections['scores']
             
@@ -97,7 +276,9 @@ class HOIModel(nn.Module):
                     human_features.append((obj_feature, det['score'], det['category_id'], det['bbox']))
                 else:
                     objects_features.append((obj_feature, det['score'], det['category_id'], det['bbox']))
-
+            print("-----------------")
+            print("human_features: ", len(human_features))
+            print("objects_features: ", len(objects_features))
             # Sort and limit the number of humans and objects if num_objects is set
             human_features.sort(key=lambda x: -x[1])
             objects_features.sort(key=lambda x: -x[1])
@@ -123,7 +304,8 @@ class HOIModel(nn.Module):
                         'object_bbox': obj[3],
                     })
                     current_index += 1
-
+            print("hoi_results: ", len(hoi_results))
+            print("-----------------")
         if all_pairs:
             all_pairs_tensor = torch.cat(all_pairs, dim=0)
             relation_scores = self.mlp(all_pairs_tensor)
