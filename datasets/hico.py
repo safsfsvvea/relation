@@ -747,17 +747,17 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         if not (target['labels'] < 80).all():
             raise ValueError("target labels should be less than or equal to 80.")
         
-        if 'labels' not in target1:
-            print("target1: ", target1)
-            print("target: ", target)
+        # if 'labels' not in target1:
+            # print("target1: ", target1)
+            # print("target: ", target)
         target1['scores'] = torch.ones((target1['labels'].shape[0],), dtype=torch.float32)
         # print("target['scores']: ", target['scores'])
         # print("target['scores'] shape: ", target['scores'].shape)
         target1['labels'] = target1['labels'] + 1
-        print("target1['labels']: ", target1['labels'])
-        print("target1['labels'] shape: ", target1['labels'].shape)
-        print("target['labels']: ", target['labels'])
-        print("target['labels'] shape: ", target['labels'].shape)
+        # print("target1['labels']: ", target1['labels'])
+        # print("target1['labels'] shape: ", target1['labels'].shape)
+        # print("target['labels']: ", target['labels'])
+        # print("target['labels'] shape: ", target['labels'].shape)
         return img, target, target1 # detection
 
     def set_rare_hois(self, anno_file):

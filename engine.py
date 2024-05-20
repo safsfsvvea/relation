@@ -8,10 +8,12 @@ from datasets.hico_eval import HICOEvaluator
 import numpy as np
 import copy
 from torchvision.ops import box_iou
+import torch.nn.functional as F
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
+def train_one_epoch(model, detector, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
     # TODO: 优化成RLIP的样子
     model.train()
+    detector.model.train()
     start_time = time.time()
     epoch_loss = 0.0
     num_batches = len(data_loader)
@@ -29,6 +31,13 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, pri
         
         forward_start_time = time.time()
         optimizer.zero_grad()
+        tensors = images.tensors
+        new_height = ((tensors.shape[2] - 1) // 32 + 1) * 32
+        new_width = ((tensors.shape[3] - 1) // 32 + 1) * 32
+        resized_images = F.interpolate(tensors, size=(new_height, new_width), mode='bilinear', align_corners=False)
+
+        yolo_out = detector.model(resized_images)
+        print(f"yolo_out: {yolo_out[0]}")
         out = model(images, targets, detections)
         step_times['forward'] = time.time() - forward_start_time
         

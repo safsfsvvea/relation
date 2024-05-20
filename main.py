@@ -1,6 +1,6 @@
 from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
-from models.hoi import HOIModel, CriterionHOI, PostProcessHOI
+from models.hoi import HOIModel, CriterionHOI, PostProcessHOI, HOIModel_old
 from models.matcher import HungarianMatcherHOI_det
 from engine import train_one_epoch, evaluate_hoi
 import datasets
@@ -24,10 +24,11 @@ from torch.utils.tensorboard import SummaryWriter
 import os
 from torch.utils.data import Subset
 from sklearn.model_selection import KFold
-
+from ultralytics import YOLO
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
+    parser.add_argument('--lr_detector', default=1e-5, type=float)
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
     parser.add_argument('--text_encoder_lr', default=5e-5, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
@@ -504,6 +505,9 @@ def main(args):
         model_type="vit_base_patch14_dinov2.lvd142m", device=device,
         denoised=True
     )
+    detector = YOLO("/cluster/home/clin/clin/relation/checkpoints/yolov8m.pt").to(device)
+    print("detector: ", detector)
+    
     # print(backbone)
     model = HOIModel(backbone, device=device)
     matcher = HungarianMatcherHOI_det(
@@ -514,9 +518,14 @@ def main(args):
         cost_giou=args.set_cost_giou
     )
     criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
-                                  weight_decay=args.weight_decay)
-    print("Number of parameters in optimizer:", len(list(optimizer.param_groups[0]['params'])))
+    optimizer = torch.optim.AdamW([
+    {'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr},
+    {'params': filter(lambda p: p.requires_grad, detector.parameters()), 'lr': args.lr_detector},
+    ], weight_decay=args.weight_decay)
+    # optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
+    #                               weight_decay=args.weight_decay)
+    print("Number of parameters in optimizer model:", len(list(optimizer.param_groups[0]['params'])))
+    print("Number of parameters in optimizer detector:", len(list(optimizer.param_groups[1]['params'])))
     postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
     if args.pretrained:
         print(f"Loading pretrained model from {args.pretrained}")
@@ -532,8 +541,8 @@ def main(args):
         dataset_val = build_dataset(image_set='trainset_val', args=args)
         # args.rare_triplets = dataset_val.dataset.rare_triplets
     else:
-        dataset_val = build_dataset(image_set='val', args=args)
-        # dataset_val = build_dataset(image_set='trainset_val', args=args)
+        # dataset_val = build_dataset(image_set='val', args=args)
+        dataset_val = build_dataset(image_set='trainset_val', args=args)
     if args.subset_size > 0:
         print("args.index", args.index)
         if args.random_subset:
@@ -645,7 +654,7 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
+            train_loss = train_one_epoch(model, detector, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
             if args.output_dir and epoch % 10 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                 checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
@@ -673,22 +682,6 @@ def main(args):
         print(f"Training completed in {elapsed_time:.2f} seconds")
         tensorboard_writer.close()
 
-    # for images, targets, detections in data_loader_train:
-    #     images = images.to(device)
-    #     targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
-    #     out = model(images, targets, detections)
-    #     # all_indices = matcher(out, targets)
-    #     # print("all_indices: ", all_indices)
-    #     loss = criterion(out, targets)
-    #     print("loss: ", loss)
-        # print("-----------------------------")
-        # print("out[0]: ", out[0])
-        # print("verb_labels[0]: ", targets[0]["verb_labels"])
-        # print("verb_labels shape[0]: ", targets[0]["verb_labels"].shape)
-        # print("targets['verb_classes'][0]: ", targets[0]['verb_classes'])
-        # # print("targets['verb_classes'] shape: ", targets[0]['verb_classes'].shape)
-        # print("-----------------------------")
-        # print(out)
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('relation training and evaluation script', parents=[get_args_parser()])

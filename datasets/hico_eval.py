@@ -41,20 +41,30 @@ class HICOEvaluator():
                 img_preds = {k: v.to('cpu').numpy() for k, v in img_preds.items()}
                 bboxes = [{'bbox': bbox, 'category_id': label} for bbox, label in zip(img_preds['boxes'], img_preds['labels'])]
                 hoi_scores = img_preds['verb_scores'] # [100, 117]
+                # print("hoi_scores: ", hoi_scores)
+                # print("hoi_scores shape: ", hoi_scores.shape)
                 verb_labels = np.tile(np.arange(hoi_scores.shape[1]), (hoi_scores.shape[0], 1))
-                # print(verb_labels)
+                # print("verb_labels1: ", verb_labels )
                 
                 subject_ids = np.tile(img_preds['sub_ids'], (hoi_scores.shape[1], 1)).T
                 object_ids = np.tile(img_preds['obj_ids'], (hoi_scores.shape[1], 1)).T
 
                 hoi_scores = hoi_scores.ravel()  # [100*117,]
                 verb_labels = verb_labels.ravel()
+                # print("verb_labels2: ", verb_labels )
                 subject_ids = subject_ids.ravel()
                 object_ids = object_ids.ravel()
 
                 if len(subject_ids) > 0:
                     object_labels = np.array([bboxes[object_id]['category_id'] for object_id in object_ids])
                     masks = correct_mat[verb_labels, object_labels]  # [11700, ]
+                    # print("verb_labels: ", verb_labels)
+                    # print("object_labels: ", object_labels)
+                    # print("len object_labels: ", len(object_labels))
+                    # print("correct_mat shape: ", correct_mat.shape)
+                    # print("correct_mat: ", correct_mat)
+                    # print("masks shape: ", masks.shape)
+                    # print("masks: ", masks)
                     hoi_scores *= masks
                     # The above step filters the hois that are in the correct map, 
                     # otherwise the score will be multiplied to zero. 
@@ -63,6 +73,7 @@ class HICOEvaluator():
                             subject_id, object_id, category_id, score in zip(subject_ids, object_ids, verb_labels, hoi_scores)]
                     # len of hois: [11700,]
                     hois.sort(key=lambda k: (k.get('score', 0)), reverse=True)  # get(key, default)
+                    # print("len hois: ", len(hois))
                     # Sort the list of dicts according to the value of the 'score'
                     hois = hois[:self.max_hois]
                 else:
@@ -75,7 +86,8 @@ class HICOEvaluator():
                 'filename':filename,
                 'predictions': bboxes,
                 'hoi_prediction': hois})
-        
+        # print("self.preds: ", self.preds)
+        # print("len(self.preds[0]['hoi_prediction']: ", len(self.preds[0]['hoi_prediction']))
         if self.use_nms_filter:
             print('Starting NMS...')
             self.preds = self.triplet_nms_filter(self.preds)
@@ -112,7 +124,10 @@ class HICOEvaluator():
             gt_hois = img_gts['hoi_annotation']
             # print('pred_hois:'+ str(len(pred_hois))) # 100
             # print('gt_hois:' + str(len(gt_hois)))  # num_of_gt hois
-
+            # print("pred_bboxes: ", pred_bboxes)
+            # print("gt_bboxes: ", gt_bboxes)
+            # print("pred_hois: ", pred_hois)
+            # print("gt_hois: ", gt_hois)
             # if len(gt_bboxes) != 0:
             ### len(pred_hois) != 0 is used to defend against the situation in zero-shot eval.
             if len(gt_bboxes) != 0 and len(pred_hois) != 0:            
@@ -357,6 +372,7 @@ class HICOEvaluator():
         pred_hois.sort(key=lambda k: (k.get('score', 0)), reverse=True)
 
         if len(pred_hois) != 0:
+            # print("pred_hois len : ", len(pred_hois))
             for pred_hoi in pred_hois:
                 is_match = 0
                 if len(match_pairs) != 0 and pred_hoi['subject_id'] in pos_pred_ids and pred_hoi['object_id'] in pos_pred_ids:
@@ -385,6 +401,7 @@ class HICOEvaluator():
                 triplet = (pred_bboxes[pred_hoi['subject_id']]['category_id'], pred_bboxes[pred_hoi['object_id']]['category_id'],
                            pred_hoi['category_id'])
                 if triplet not in self.gt_triplets:
+                    # print("triplet not in gt_triplets")
                     continue
                 if is_match == 1 and vis_tag[gt_hois.index(max_gt_hoi)] == 0:
                     self.fp[triplet].append(0)
@@ -395,6 +412,9 @@ class HICOEvaluator():
                     self.fp[triplet].append(1)
                     self.tp[triplet].append(0)
                 self.score[triplet].append(pred_hoi['score'])
+                # print("self.fp: ", self.fp)
+                # print("self.tp: ", self.tp)
+                # print("self.score: ", self.score)
 
     
     def record_fp(self, pred_hois, gt_hois, match_pairs, pred_bboxes, bbox_overlaps):

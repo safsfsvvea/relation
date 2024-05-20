@@ -14,13 +14,14 @@
 python main.py \
     --hoi_path /cluster/home/clin/clin/RLIPv2/data/hico_20160224_det \
     --hico_det_file /cluster/home/clin/clin/RLIPv2/data/hico_20160224_det/internimage/hico_det.json \
-    --output_dir /cluster/home/clin/clin/relation/results/test \
+    --output_dir /cluster/home/clin/clin/relation/results/yolo_test \
     --hoi \
-    --dataset_file hico_det \
+    --dataset_file hico_det_gt \
     --lr 5e-3 \
+    --lr_detector 5e-4 \
     --num_queries 200 \
     --relation_threshold 0.20 \
-    --num_workers 1 \
+    --num_workers 8 \
     --batch_size 4 \
     --use_correct_subject_category_hico \
     --epochs 1 \
