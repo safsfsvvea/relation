@@ -17,8 +17,8 @@ logs/
 **/build/
 
 # 忽略所有 .txt 文件，除了根目录下的 readme.txt
-*.txt
-!readme.txt
+# *.txt
+# !readme.txt
 
 # 忽略所有 .pdf 文件，但不忽略 doc/manual.pdf
 *.pdf
