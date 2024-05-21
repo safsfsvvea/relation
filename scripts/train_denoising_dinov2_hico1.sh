@@ -12,9 +12,10 @@
 # export TORCH_DISTRIBUTED_DETAIL=DEBUG;
 # # Pay attention to the learning rate if channging #nodes
 python main.py \
-    --hoi_path /cluster/home/clin/clin/RLIPv2/data/hico_20160224_det \
-    --hico_det_file /cluster/home/clin/clin/RLIPv2/data/hico_20160224_det/internimage/hico_det.json \
-    --output_dir /cluster/home/clin/clin/relation/results/yolo_test \
+    --pretrained_backbone feature_map_visualize/checkpoints/feat_visualize_models/dinov2_v1.pth \
+    --hoi_path ../RLIPv2/data/hico_20160224_det \
+    --hico_det_file ../RLIPv2/data/hico_20160224_det/internimage/hico_det.json \
+    --output_dir results/yolo_test \
     --hoi \
     --dataset_file hico_det_gt \
     --lr 5e-3 \

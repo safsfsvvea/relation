@@ -114,6 +114,8 @@ def get_args_parser():
                         help="Number of verb classes")
     parser.add_argument('--pretrained', type=str, default='',
                         help='Pretrained model path')
+    parser.add_argument('--pretrained_backbone', type=str, default='',
+                        help='Pretrained backbone path')
     parser.add_argument('--pretrained_swin', type=str, default='',
                         help='Pretrained model path for the swin backbone only!!!')
     parser.add_argument('--drop_path_rate', default=0.2, type=float,
@@ -502,11 +504,11 @@ def ensure_dir(directory):
 def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     backbone = DenoisingVitBackbone(
-        model_type="vit_base_patch14_dinov2.lvd142m", device=device,
+        model_type="vit_base_patch14_dinov2.lvd142m", device=device, checkpoint_path=args.pretrained_backbone,
         denoised=True
     )
-    detector = YOLO("/cluster/home/clin/clin/relation/checkpoints/yolov8m.pt").to(device)
-    print("detector: ", detector)
+    # detector = YOLO("checkpoints/yolov8m.pt").to(device)
+    # print("detector: ", detector)
     
     # print(backbone)
     model = HOIModel(backbone, device=device)
@@ -518,20 +520,20 @@ def main(args):
         cost_giou=args.set_cost_giou
     )
     criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
-    optimizer = torch.optim.AdamW([
-    {'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr},
-    {'params': filter(lambda p: p.requires_grad, detector.parameters()), 'lr': args.lr_detector},
-    ], weight_decay=args.weight_decay)
-    # optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
-    #                               weight_decay=args.weight_decay)
+    # optimizer = torch.optim.AdamW([
+    # {'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr},
+    # {'params': filter(lambda p: p.requires_grad, detector.parameters()), 'lr': args.lr_detector},
+    # ], weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
+                                  weight_decay=args.weight_decay)
     print("Number of parameters in optimizer model:", len(list(optimizer.param_groups[0]['params'])))
-    print("Number of parameters in optimizer detector:", len(list(optimizer.param_groups[1]['params'])))
+    # print("Number of parameters in optimizer detector:", len(list(optimizer.param_groups[1]['params'])))
     postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
     if args.pretrained:
         print(f"Loading pretrained model from {args.pretrained}")
         checkpoint = torch.load(args.pretrained, map_location='cpu')
         model.load_state_dict(checkpoint['state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
+        # optimizer.load_state_dict(checkpoint['optimizer'])
         start_epoch = checkpoint['epoch']
         print(f"Loaded checkpoint from epoch {start_epoch}")
     image_set_key = 'train'
@@ -654,7 +656,7 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss = train_one_epoch(model, detector, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
+            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
             if args.output_dir and epoch % 10 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                 checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"

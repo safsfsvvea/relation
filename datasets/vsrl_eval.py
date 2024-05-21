@@ -503,9 +503,9 @@ def voc_ap(rec, prec):
 
 
 if __name__ == '__main__':
-  vcocoeval = VCOCOeval('/cluster/home/clin/clin/RLIPv2/data/v-coco/vcoco_test.json',
-                        '/cluster/home/clin/clin/RLIPv2/data/v-coco/data/instances_vcoco_all_2014.json',
-                        '/cluster/home/clin/clin/RLIPv2/data/v-coco/data/splits/vcoco_test.ids')
+  vcocoeval = VCOCOeval('../RLIPv2/data/v-coco/vcoco_test.json',
+                        '../RLIPv2/data/v-coco/data/instances_vcoco_all_2014.json',
+                        '../RLIPv2/data/v-coco/data/splits/vcoco_test.ids')
 
   ### Paper VCOCO
   # vcocoeval._do_eval('/Path/To/jacob/VCOCO_pickle/ParSe_vcoco.pickle',
@@ -546,5 +546,5 @@ if __name__ == '__main__':
   #                      ovr_thresh=0.5)
   # vcocoeval._do_eval('/Path/To/jacob/VCOCO_pickle/RLIPv2/RLIP_PD_v2_VCOCO_SwinT_VGCOCOO365.pickle',
   #                      ovr_thresh=0.5)
-  vcocoeval._do_eval('/cluster/home/clin/clin/RLIPv2/result/VCOCO_pickle/fully_fine_tuned_swinL.pickle',
+  vcocoeval._do_eval('../RLIPv2/result/VCOCO_pickle/fully_fine_tuned_swinL.pickle',
                        ovr_thresh=0.5)

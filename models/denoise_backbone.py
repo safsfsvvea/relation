@@ -8,7 +8,7 @@ from util.misc import NestedTensor
 import torch.nn.functional as F
 
 class DenoisingVitBackbone(nn.Module):
-    def __init__(self, model_type, device, train_backbone=False, denoised=True, resize=None):
+    def __init__(self, model_type, device, checkpoint_path, train_backbone=False, denoised=True, resize=None):
         super().__init__()
         self.denoised = denoised
         self.model_type = model_type
@@ -16,6 +16,7 @@ class DenoisingVitBackbone(nn.Module):
         self.resize = resize
         self.patch_size = self.get_patch_size(model_type)
         self.device = device
+        self.checkpoint_path = checkpoint_path
         self.model = self.load_model()
 
     def get_patch_size(self, model_type):
@@ -31,8 +32,7 @@ class DenoisingVitBackbone(nn.Module):
             print("model_type: ", self.model_type)
             vit = ViTWrapper(self.model_type, stride=self.patch_size)
             model = Denoiser(noise_map_height=37, noise_map_width=37, vit=vit, feature_dim=768)
-            checkpoint_path = '/cluster/home/clin/clin/feature_map_visualize/checkpoints/feat_visualize_models/dinov2_v1.pth'
-            model.load_state_dict(torch.load(checkpoint_path), strict=False)
+            model.load_state_dict(torch.load(self.checkpoint_path), strict=False)
         else:
             model = ViTWrapper(self.model_type, stride=self.patch_size)
         model.to(self.device)

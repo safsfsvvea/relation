@@ -12,10 +12,11 @@
 # export TORCH_DISTRIBUTED_DETAIL=DEBUG;
 # # Pay attention to the learning rate if channging #nodes
 python main.py \
-    --pretrained /cluster/home/clin/clin/relation/results/test_20_gt_focal/checkpoint.pth.tar \
-    --hoi_path /cluster/home/clin/clin/RLIPv2/data/hico_20160224_det \
-    --hico_det_file /cluster/home/clin/clin/RLIPv2/data/hico_20160224_det/internimage/hico_det.json \
-    --output_dir /cluster/home/clin/clin/relation/results/test \
+    --pretrained results/test_20_gt_focal/checkpoint.pth.tar \
+    --pretrained_backbone feature_map_visualize/checkpoints/feat_visualize_models/dinov2_v1.pth \
+    --hoi_path ../RLIPv2/data/hico_20160224_det \
+    --hico_det_file ../RLIPv2/data/hico_20160224_det/internimage/hico_det.json \
+    --output_dir results/test \
     --hoi \
     --dataset_file hico_det_gt \
     --num_queries 200 \
@@ -27,7 +28,7 @@ python main.py \
     --verb_loss_type bce \
     --eval \
     --subset_size 20 \
-    --index 1 \
+    # --index 1 \
     # --load_backbone supervised \
     # --backbone DINOv2 \
     # --set_cost_bbox 2.5 \

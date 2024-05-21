@@ -40,7 +40,7 @@ class VCOCO(torch.utils.data.Dataset):
         
         # vcoco_names_path = '/mnt/data-nas/peizhi/jacob/RLIP/datasets/vcoco_names.json'
         # vcoco_names_path = '/mnt/data-nas/peizhi/jacob/RLIP/datasets/vcoco_names_v2.json'
-        vcoco_names_path = '/cluster/home/clin/clin/RLIPv2/datasets/vcoco_names_v3.json'
+        vcoco_names_path = 'datasets/vcoco_names_v3.json'
         # vcoco_names_path = '/mnt/data-nas/peizhi/jacob/RLIP/datasets/vcoco_names_v4.json'
         print('Loading VCOCO words from {}...'.format(vcoco_names_path))
         with open(vcoco_names_path, 'r') as f:

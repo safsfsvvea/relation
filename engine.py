@@ -9,11 +9,11 @@ import numpy as np
 import copy
 from torchvision.ops import box_iou
 import torch.nn.functional as F
-
-def train_one_epoch(model, detector, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
+import torchvision.transforms as T
+def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
     # TODO: 优化成RLIP的样子
     model.train()
-    detector.model.train()
+    # detector.model.train()
     start_time = time.time()
     epoch_loss = 0.0
     num_batches = len(data_loader)
@@ -31,13 +31,21 @@ def train_one_epoch(model, detector, criterion, optimizer, data_loader, device, 
         
         forward_start_time = time.time()
         optimizer.zero_grad()
-        tensors = images.tensors
-        new_height = ((tensors.shape[2] - 1) // 32 + 1) * 32
-        new_width = ((tensors.shape[3] - 1) // 32 + 1) * 32
-        resized_images = F.interpolate(tensors, size=(new_height, new_width), mode='bilinear', align_corners=False)
-
-        yolo_out = detector.model(resized_images)
-        print(f"yolo_out: {yolo_out[0]}")
+        # tensors = images.tensors
+        # new_height = ((tensors.shape[2] - 1) // 32 + 1) * 32
+        # new_width = ((tensors.shape[3] - 1) // 32 + 1) * 32
+        # preprocess = T.Compose([
+        #     T.Resize((new_height, new_width), interpolation=T.InterpolationMode.BILINEAR),
+        #     T.ToTensor(),
+        #     T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        # ])
+        # resized_images = F.interpolate(tensors, size=(new_height, new_width), mode='bilinear', align_corners=False)
+        # resized_images = preprocess(images.tensors)
+        # resized_images = resized_images / 255.0
+        # resized_images = torch.clamp(resized_images, 0.0, 1.0)
+        # assert torch.all((resized_images >= 0) & (resized_images <= 1)), "Values are not in range [0, 1]"
+        # yolo_out = detector(resized_images)
+        # print(f"yolo_out: {yolo_out[0].boxes}")
         out = model(images, targets, detections)
         step_times['forward'] = time.time() - forward_start_time
         

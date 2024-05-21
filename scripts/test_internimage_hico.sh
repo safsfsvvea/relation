@@ -1,7 +1,7 @@
 #!/bin/bash
 python evaluate_det.py \
-    --hoi_path "/cluster/home/clin/clin/RLIPv2/data/hico_20160224_det" \
-    --output_dir /cluster/home/clin/clin/relation/results/test \
+    --hoi_path "../RLIPv2/data/hico_20160224_det" \
+    --output_dir results/test \
     --hoi \
     --dataset_file hico \
     --num_workers 1 \

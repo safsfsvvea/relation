@@ -6,10 +6,11 @@ END_INDEX=19
 for i in $(seq $START_INDEX $END_INDEX)
 do
     python main.py \
-    --pretrained /cluster/home/clin/clin/relation/results/test_20_gt_focal/checkpoint.pth.tar \
-    --hoi_path /cluster/home/clin/clin/RLIPv2/data/hico_20160224_det \
-    --hico_det_file /cluster/home/clin/clin/RLIPv2/data/hico_20160224_det/internimage/hico_det.json \
-    --output_dir /cluster/home/clin/clin/relation/results/test \
+    --pretrained results/test_20_gt_focal/checkpoint.pth.tar \
+    --pretrained_backbone feature_map_visualize/checkpoints/feat_visualize_models/dinov2_v1.pth \
+    --hoi_path ../RLIPv2/data/hico_20160224_det \
+    --hico_det_file ../RLIPv2/data/hico_20160224_det/internimage/hico_det.json \
+    --output_dir results/test \
     --hoi \
     --dataset_file hico_det_gt \
     --num_queries 200 \

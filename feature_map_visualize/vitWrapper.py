@@ -106,7 +106,7 @@ class ViTWrapper(nn.Module):
                 num_classes=num_classes,
                 dynamic_img_size=self.dynamic_img_size,
                 dynamic_img_pad=self.dynamic_img_pad,
-                pretrained_cfg_overlay=dict(file=f"/cluster/home/clin/clin/feature_map_visualize/checkpoints/feat_visualize_models/{model_type}.bin"),
+                pretrained_cfg_overlay=dict(file=f"feature_map_visualize/checkpoints/feat_visualize_models/{model_type}.bin"),
                 **kwargs,
             )
         except:

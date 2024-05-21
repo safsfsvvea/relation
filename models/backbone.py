@@ -16,7 +16,7 @@ class DINOv2Backbone(nn.Module):
 
     def load_model(self, pretrained_path):
         # 加载 DINOv2 模型
-        model = torch.hub.load('/cluster/home/clin/clin/dinov2', 'dinov2_vitb14_reg', source='local', pretrained=False)
+        model = torch.hub.load('../dinov2', 'dinov2_vitb14_reg', source='local', pretrained=False)
         if pretrained_path:
             model.load_state_dict(torch.load(pretrained_path))
             print('Loading DINOv2 from localdir...')
@@ -60,11 +60,11 @@ class DINOv2Backbone(nn.Module):
         return features, scales
 
 # 示例用法
-if __name__ == "__main__":
-    backbone = DINOv2Backbone(
-        model_type="dinov2_vitb14_reg",
-        patch_size=14,
-        pretrained_path='/cluster/home/clin/clin/RLIPv2/checkpoints/DINOv2/dinov2_vitb14_reg4_pretrain.pth'
-    )
-    features, scales = backbone.extract_features('/path/to/image.jpg')
-    print("提取的特征:", features.shape, "缩放比例:", scales)
+# if __name__ == "__main__":
+#     backbone = DINOv2Backbone(
+#         model_type="dinov2_vitb14_reg",
+#         patch_size=14,
+#         pretrained_path='../RLIPv2/checkpoints/DINOv2/dinov2_vitb14_reg4_pretrain.pth'
+#     )
+#     features, scales = backbone.extract_features('/path/to/image.jpg')
+#     print("提取的特征:", features.shape, "缩放比例:", scales)
