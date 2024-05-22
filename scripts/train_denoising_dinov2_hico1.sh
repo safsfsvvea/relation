@@ -22,12 +22,12 @@ python main.py \
     --lr_detector 5e-4 \
     --num_queries 200 \
     --relation_threshold 0.20 \
-    --num_workers 8 \
+    --num_workers 2 \
     --batch_size 4 \
     --use_correct_subject_category_hico \
     --epochs 1 \
     --verb_loss_type focal \
-    --subset_size 20 \
+    --subset_size 32 \
     # --do_cross_validation
     # --load_backbone supervised \
     # --backbone DINOv2 \

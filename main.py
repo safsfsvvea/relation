@@ -1,8 +1,8 @@
 from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
-from models.hoi import HOIModel, CriterionHOI, PostProcessHOI, HOIModel_old
+from models.hoi import HOIModel, CriterionHOI, PostProcessHOI, HOIModel_old, HOIModel_profiler, HOIModel_time
 from models.matcher import HungarianMatcherHOI_det
-from engine import train_one_epoch, evaluate_hoi
+from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time
 import datasets
 from datasets.hico import CustomSubset
 import util.misc as utils
@@ -24,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 import os
 from torch.utils.data import Subset
 from sklearn.model_selection import KFold
-from ultralytics import YOLO
+# from ultralytics import YOLO
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
@@ -511,7 +511,7 @@ def main(args):
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel(backbone, device=device)
+    model = HOIModel_profiler(backbone, device=device)
     matcher = HungarianMatcherHOI_det(
         device=device,
         cost_obj_class=args.set_cost_obj_class,
@@ -656,7 +656,7 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
+            train_loss = train_one_epoch_with_time(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
             if args.output_dir and epoch % 10 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                 checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"

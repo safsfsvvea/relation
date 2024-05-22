@@ -10,6 +10,227 @@ import copy
 from torchvision.ops import box_iou
 import torch.nn.functional as F
 import torchvision.transforms as T
+import torch.profiler
+def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
+    model.train()
+    start_time = time.time()
+    epoch_loss = 0.0
+    num_batches = len(data_loader)
+    
+    progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}")
+    
+    # Initialize profiler
+    schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1)
+    profiler = torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        schedule=schedule,
+        on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True
+    )
+    
+    profiler.start()
+
+    for batch_idx, (images, targets, detections) in progress_bar:
+        step_times = {}
+        
+        # Data transfer to GPU
+        transfer_start_event = torch.cuda.Event(enable_timing=True)
+        transfer_end_event = torch.cuda.Event(enable_timing=True)
+        
+        transfer_start_event.record()
+        images = images.to(device)
+        targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
+        transfer_end_event.record()
+        
+        torch.cuda.synchronize()
+        step_times['data_transfer'] = transfer_start_event.elapsed_time(transfer_end_event) / 1000.0
+        
+        # Forward pass
+        forward_start_event = torch.cuda.Event(enable_timing=True)
+        forward_end_event = torch.cuda.Event(enable_timing=True)
+        
+        forward_start_event.record()
+        optimizer.zero_grad()
+        out = model(images, targets, detections)
+        forward_end_event.record()
+        
+        torch.cuda.synchronize()
+        step_times['forward'] = forward_start_event.elapsed_time(forward_end_event) / 1000.0
+        
+        if not all(len(output) == 0 for output in out):
+            # Loss calculation
+            loss_start_event = torch.cuda.Event(enable_timing=True)
+            loss_end_event = torch.cuda.Event(enable_timing=True)
+            
+            loss_start_event.record()
+            loss = criterion(out, targets)
+            loss_end_event.record()
+            
+            torch.cuda.synchronize()
+            step_times['loss_calc'] = loss_start_event.elapsed_time(loss_end_event) / 1000.0
+            
+            # Backward pass
+            backward_start_event = torch.cuda.Event(enable_timing=True)
+            backward_end_event = torch.cuda.Event(enable_timing=True)
+            
+            backward_start_event.record()
+            loss.backward()
+            backward_end_event.record()
+            
+            torch.cuda.synchronize()
+            step_times['backward'] = backward_start_event.elapsed_time(backward_end_event) / 1000.0
+            
+            # Optimization step
+            optimize_start_event = torch.cuda.Event(enable_timing=True)
+            optimize_end_event = torch.cuda.Event(enable_timing=True)
+            
+            optimize_start_event.record()
+            optimizer.step()
+            optimize_end_event.record()
+            
+            torch.cuda.synchronize()
+            step_times['optimize'] = optimize_start_event.elapsed_time(optimize_end_event) / 1000.0
+        else:
+            loss = torch.tensor(0.0, device=device)
+            step_times['loss_calc'] = 0.0
+            step_times['backward'] = 0.0
+            step_times['optimize'] = 0.0
+        
+        epoch_loss += loss.item()
+        
+        # 打印每个batch的时间
+        print(f"Batch {batch_idx + 1}:")
+        print(f"  Data transfer: {step_times['data_transfer']:.4f} seconds")
+        print(f"  Forward pass: {step_times['forward']:.4f} seconds")
+        print(f"  Loss calculation: {step_times['loss_calc']:.4f} seconds")
+        print(f"  Backward pass: {step_times['backward']:.4f} seconds")
+        print(f"  Optimization: {step_times['optimize']:.4f} seconds")
+        
+        if (batch_idx + 1) % print_freq == 0:
+            avg_loss = epoch_loss / (batch_idx + 1)
+            elapsed_time = time.time() - start_time
+            eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
+            
+            progress_bar.set_postfix(loss=f"{avg_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")
+        
+        # 保存训练中间信息到tensorboard
+        if tensorboard_writer is not None:
+            global_step = epoch * num_batches + batch_idx
+            tensorboard_writer.add_scalar('train_loss', loss.item(), global_step=global_step)
+        
+        profiler.step()
+    
+    profiler.stop()
+
+    # 打印训练总时间
+    elapsed_time = time.time() - start_time
+    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average loss: {epoch_loss / num_batches:.4f}")
+    
+    return epoch_loss / num_batches
+def train_one_epoch_with_time(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
+    model.train()
+    start_time = time.time()
+    epoch_loss = 0.0
+    num_batches = len(data_loader)
+    
+    progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}")
+    
+    for batch_idx, (images, targets, detections) in progress_bar:
+        step_times = {}
+        
+        # Data transfer to GPU
+        transfer_start_event = torch.cuda.Event(enable_timing=True)
+        transfer_end_event = torch.cuda.Event(enable_timing=True)
+        
+        transfer_start_event.record()
+        images = images.to(device)
+        targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
+        transfer_end_event.record()
+        
+        torch.cuda.synchronize()
+        step_times['data_transfer'] = transfer_start_event.elapsed_time(transfer_end_event) / 1000.0
+        
+        # Forward pass
+        forward_start_event = torch.cuda.Event(enable_timing=True)
+        forward_end_event = torch.cuda.Event(enable_timing=True)
+        
+        forward_start_event.record()
+        optimizer.zero_grad()
+        out = model(images, targets, detections)
+        forward_end_event.record()
+        
+        torch.cuda.synchronize()
+        step_times['forward'] = forward_start_event.elapsed_time(forward_end_event) / 1000.0
+        
+        if not all(len(output) == 0 for output in out):
+            # Loss calculation
+            loss_start_event = torch.cuda.Event(enable_timing=True)
+            loss_end_event = torch.cuda.Event(enable_timing=True)
+            
+            loss_start_event.record()
+            loss = criterion(out, targets)
+            loss_end_event.record()
+            
+            torch.cuda.synchronize()
+            step_times['loss_calc'] = loss_start_event.elapsed_time(loss_end_event) / 1000.0
+            
+            # Backward pass
+            backward_start_event = torch.cuda.Event(enable_timing=True)
+            backward_end_event = torch.cuda.Event(enable_timing=True)
+            
+            backward_start_event.record()
+            loss.backward()
+            backward_end_event.record()
+            
+            torch.cuda.synchronize()
+            step_times['backward'] = backward_start_event.elapsed_time(backward_end_event) / 1000.0
+            
+            # Optimization step
+            optimize_start_event = torch.cuda.Event(enable_timing=True)
+            optimize_end_event = torch.cuda.Event(enable_timing=True)
+            
+            optimize_start_event.record()
+            optimizer.step()
+            optimize_end_event.record()
+            
+            torch.cuda.synchronize()
+            step_times['optimize'] = optimize_start_event.elapsed_time(optimize_end_event) / 1000.0
+        else:
+            loss = torch.tensor(0.0, device=device)
+            step_times['loss_calc'] = 0.0
+            step_times['backward'] = 0.0
+            step_times['optimize'] = 0.0
+        
+        epoch_loss += loss.item()
+        
+        # 打印每个batch的时间
+        print(f"Batch {batch_idx + 1}:")
+        print(f"  Data transfer: {step_times['data_transfer']:.4f} seconds")
+        print(f"  Forward pass: {step_times['forward']:.4f} seconds")
+        print(f"  Loss calculation: {step_times['loss_calc']:.4f} seconds")
+        print(f"  Backward pass: {step_times['backward']:.4f} seconds")
+        print(f"  Optimization: {step_times['optimize']:.4f} seconds")
+        
+        if (batch_idx + 1) % print_freq == 0:
+            avg_loss = epoch_loss / (batch_idx + 1)
+            elapsed_time = time.time() - start_time
+            eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
+            
+            progress_bar.set_postfix(loss=f"{avg_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")
+        
+        # 保存训练中间信息到tensorboard
+        if tensorboard_writer is not None:
+            global_step = epoch * num_batches + batch_idx
+            tensorboard_writer.add_scalar('train_loss', loss.item(), global_step=global_step)
+    
+    # 打印训练总时间
+    elapsed_time = time.time() - start_time
+    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average loss: {epoch_loss / num_batches:.4f}")
+    
+    return epoch_loss / num_batches
+
 def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
     # TODO: 优化成RLIP的样子
     model.train()
