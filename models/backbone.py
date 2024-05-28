@@ -13,10 +13,11 @@ class DINOv2Backbone(nn.Module):
         self.num_feature_levels = num_feature_levels
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model = self.load_model(pretrained_path)
-
+        self.resize = None
+        
     def load_model(self, pretrained_path):
         # 加载 DINOv2 模型
-        model = torch.hub.load('../dinov2', 'dinov2_vitb14_reg', source='local', pretrained=False)
+        model = torch.hub.load('/bd_targaryen/users/clin/RLIPv2/dinov2', 'dinov2_vitb14_reg', source='local', pretrained=False)
         if pretrained_path:
             model.load_state_dict(torch.load(pretrained_path))
             print('Loading DINOv2 from localdir...')
@@ -43,16 +44,18 @@ class DINOv2Backbone(nn.Module):
     def forward(self, img):
         # img = nested_tensor.tensors
         # mask = nested_tensor.mask
-        img, scales = self.get_transform(img)
+        # img, scales = self.get_transform(img)
         img = img.to(self.device)
+        # print("image shape:", img.shape)
+        _, _, H, W = img.shape
         with torch.no_grad():
             intermediate_layers = self.model.get_intermediate_layers(img, self.num_feature_levels)
             features = {}
             for i, x in enumerate(intermediate_layers):
                 x = x.permute(0, 2, 1)
-                x = x.view(x.shape[0], -1, self.new_height // 14, self.new_width // 14)
+                x = x.view(x.shape[0], -1, H // 14, W // 14)
                 features[f'layer_{len(intermediate_layers) - i}'] = x
-        return features, scales
+        return features
 
     def extract_features(self, img_path):
         img = Image.open(img_path).convert('RGB')

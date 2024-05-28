@@ -2,7 +2,7 @@ from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
 from models.hoi import HOIModel, CriterionHOI, PostProcessHOI, HOIModel_old, HOIModel_profiler, HOIModel_time
 from models.matcher import HungarianMatcherHOI_det
-from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time
+from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time, backbone_time, backbone_time_amp
 import datasets
 from datasets.hico import CustomSubset
 import util.misc as utils
@@ -24,6 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 import os
 from torch.utils.data import Subset
 from sklearn.model_selection import KFold
+import torchvision.models as models
 # from ultralytics import YOLO
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
@@ -503,15 +504,27 @@ def ensure_dir(directory):
 
 def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    
+    checkpoint_path = '/bd_targaryen/users/clin/RLIPv2/checkpoints/resnet50-19c8e357.pth'
+    resnet = models.resnet50()
+    state_dict = torch.load(checkpoint_path)
+    resnet.load_state_dict(state_dict)
+    resnet.to(device)
+    
     backbone = DenoisingVitBackbone(
         model_type="vit_base_patch14_dinov2.lvd142m", device=device, checkpoint_path=args.pretrained_backbone,
         denoised=True
     )
+    # backbone = backbone = DINOv2Backbone(
+    #     model_type="dinov2_vitb14_reg",
+    #     patch_size=14,
+    #     pretrained_path="../RLIPv2/checkpoints/DINOv2/dinov2_vitb14_reg4_pretrain.pth"
+    # )
     # detector = YOLO("checkpoints/yolov8m.pt").to(device)
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel_profiler(backbone, device=device)
+    model = HOIModel(backbone, device=device)
     matcher = HungarianMatcherHOI_det(
         device=device,
         cost_obj_class=args.set_cost_obj_class,
@@ -543,8 +556,8 @@ def main(args):
         dataset_val = build_dataset(image_set='trainset_val', args=args)
         # args.rare_triplets = dataset_val.dataset.rare_triplets
     else:
-        # dataset_val = build_dataset(image_set='val', args=args)
-        dataset_val = build_dataset(image_set='trainset_val', args=args)
+        dataset_val = build_dataset(image_set='val', args=args)
+        # dataset_val = build_dataset(image_set='trainset_val', args=args)
     if args.subset_size > 0:
         print("args.index", args.index)
         if args.random_subset:
@@ -651,12 +664,13 @@ def main(args):
             test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
             return
         
-        tensorboard_writer = SummaryWriter(log_dir='logs')
+        # backbone_time_amp(backbone, criterion, optimizer, data_loader_train, device, 0)
+        tensorboard_writer = SummaryWriter(log_dir='logs/bce')
         num_epochs = args.epochs
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss = train_one_epoch_with_time(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
+            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
             if args.output_dir and epoch % 10 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                 checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"

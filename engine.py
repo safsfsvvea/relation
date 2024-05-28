@@ -11,6 +11,167 @@ from torchvision.ops import box_iou
 import torch.nn.functional as F
 import torchvision.transforms as T
 import torch.profiler
+import os
+from torch.cuda.amp import GradScaler, autocast  # 添加混合精度相关库
+
+def backbone_time_amp(backbone, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
+    backbone.eval()
+    start_time = time.time()
+    num_batches = len(data_loader)
+    
+    progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}")
+
+    # Ensure the logs directory exists
+    log_dir = '/bd_targaryen/users/clin/relation/logs/log_amp_1'
+    os.makedirs(log_dir, exist_ok=True)
+    
+    schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1)
+    profiler = torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        schedule=schedule,
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(log_dir),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True
+    )
+    
+    profiler.start()
+    print("Profiler started")
+
+    with profiler:
+        for batch_idx, (images, targets, detections) in progress_bar:
+            step_times = {}
+            
+            # Data transfer to GPU
+            with torch.profiler.record_function("Data Transfer"):
+                transfer_start_event = torch.cuda.Event(enable_timing=True)
+                transfer_end_event = torch.cuda.Event(enable_timing=True)
+                
+                transfer_start_event.record()
+                images = images.to(device)
+                targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
+                transfer_end_event.record()
+                
+                torch.cuda.synchronize()
+                step_times['data_transfer'] = transfer_start_event.elapsed_time(transfer_end_event) / 1000.0
+            
+            # Forward pass
+            with torch.profiler.record_function("Forward Pass"):
+                forward_start_event = torch.cuda.Event(enable_timing=True)
+                forward_end_event = torch.cuda.Event(enable_timing=True)
+                
+                forward_start_event.record()
+                optimizer.zero_grad()
+                
+                with autocast():  # 使用 autocast 进行混合精度前向传播
+                    tensors = images.tensors
+                    out = backbone(tensors)
+                
+                forward_end_event.record()
+                
+                torch.cuda.synchronize()
+                step_times['forward'] = forward_start_event.elapsed_time(forward_end_event) / 1000.0
+            
+            # 打印每个batch的时间
+            print(f"Batch {batch_idx + 1}:")
+            print(f"  Data transfer: {step_times['data_transfer']:.4f} seconds")
+            print(f"  Forward pass: {step_times['forward']:.4f} seconds")
+            
+            if (batch_idx + 1) % print_freq == 0:
+                elapsed_time = time.time() - start_time
+                eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
+                
+                progress_bar.set_postfix(time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")
+            
+            profiler.step()
+            print(f"Profiler step {batch_idx + 1} completed")
+
+    profiler.stop()
+    print("Profiler stopped")
+
+    elapsed_time = time.time() - start_time
+    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds.")
+    
+    return
+
+def backbone_time(backbone, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
+    backbone.eval()
+    # print("device:", backbone.device)
+    start_time = time.time()
+    num_batches = len(data_loader)
+    
+    progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}")
+
+    # Ensure the logs directory exists
+    log_dir = '/bd_targaryen/users/clin/relation/logs/log_noamp_4'
+    os.makedirs(log_dir, exist_ok=True)
+    
+    schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1)
+    profiler = torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        schedule=schedule,
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(log_dir),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True
+    )
+    
+    profiler.start()
+    print("Profiler started")
+
+    with profiler:
+        for batch_idx, (images, targets, detections) in progress_bar:
+            step_times = {}
+            
+            # Data transfer to GPU
+            with torch.profiler.record_function("Data Transfer"):
+                transfer_start_event = torch.cuda.Event(enable_timing=True)
+                transfer_end_event = torch.cuda.Event(enable_timing=True)
+                
+                transfer_start_event.record()
+                images = images.to(device)
+                targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
+                transfer_end_event.record()
+                
+                torch.cuda.synchronize()
+                step_times['data_transfer'] = transfer_start_event.elapsed_time(transfer_end_event) / 1000.0
+            
+            # Forward pass
+            with torch.profiler.record_function("Forward Pass"):
+                forward_start_event = torch.cuda.Event(enable_timing=True)
+                forward_end_event = torch.cuda.Event(enable_timing=True)
+                
+                forward_start_event.record()
+                optimizer.zero_grad()
+                tensors = images.tensors
+                out = backbone(tensors)
+                forward_end_event.record()
+                
+                torch.cuda.synchronize()
+                step_times['forward'] = forward_start_event.elapsed_time(forward_end_event) / 1000.0
+            
+            # 打印每个batch的时间
+            print(f"Batch {batch_idx + 1}:")
+            print(f"  Data transfer: {step_times['data_transfer']:.4f} seconds")
+            print(f"  Forward pass: {step_times['forward']:.4f} seconds")
+            
+            if (batch_idx + 1) % print_freq == 0:
+                elapsed_time = time.time() - start_time
+                eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
+                
+                progress_bar.set_postfix(time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")
+            
+            profiler.step()
+            print(f"Profiler step {batch_idx + 1} completed")
+
+    profiler.stop()
+    print("Profiler stopped")
+
+    elapsed_time = time.time() - start_time
+    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds.")
+    
+    return
+
 def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
     model.train()
     start_time = time.time()
@@ -31,6 +192,7 @@ def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, devi
     )
     
     profiler.start()
+    scaler = GradScaler()  # 初始化 GradScaler
 
     for batch_idx, (images, targets, detections) in progress_bar:
         step_times = {}
@@ -53,7 +215,8 @@ def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, devi
         
         forward_start_event.record()
         optimizer.zero_grad()
-        out = model(images, targets, detections)
+        with autocast():  # 使用 autocast 进行混合精度前向传播
+            out = model(images, targets, detections)
         forward_end_event.record()
         
         torch.cuda.synchronize()
@@ -65,7 +228,8 @@ def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, devi
             loss_end_event = torch.cuda.Event(enable_timing=True)
             
             loss_start_event.record()
-            loss = criterion(out, targets)
+            with autocast():  # 使用 autocast 进行混合精度损失计算
+                loss = criterion(out, targets)
             loss_end_event.record()
             
             torch.cuda.synchronize()
@@ -76,7 +240,7 @@ def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, devi
             backward_end_event = torch.cuda.Event(enable_timing=True)
             
             backward_start_event.record()
-            loss.backward()
+            scaler.scale(loss).backward()
             backward_end_event.record()
             
             torch.cuda.synchronize()
@@ -87,7 +251,8 @@ def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, devi
             optimize_end_event = torch.cuda.Event(enable_timing=True)
             
             optimize_start_event.record()
-            optimizer.step()
+            scaler.step(optimizer)  # 使用 GradScaler 进行优化步骤
+            scaler.update()
             optimize_end_event.record()
             
             torch.cuda.synchronize()
@@ -241,62 +406,29 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, pri
     
     progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}")
     
+    scaler = GradScaler()  # 初始化 GradScaler
+    
     for batch_idx, (images, targets, detections) in progress_bar:
-        step_times = {}
-        step_start_time = time.time()
-        
-        transfer_start_time = time.time()
+
         images = images.to(device)
         targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        step_times['data_transfer'] = time.time() - transfer_start_time
         
-        forward_start_time = time.time()
         optimizer.zero_grad()
-        # tensors = images.tensors
-        # new_height = ((tensors.shape[2] - 1) // 32 + 1) * 32
-        # new_width = ((tensors.shape[3] - 1) // 32 + 1) * 32
-        # preprocess = T.Compose([
-        #     T.Resize((new_height, new_width), interpolation=T.InterpolationMode.BILINEAR),
-        #     T.ToTensor(),
-        #     T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        # ])
-        # resized_images = F.interpolate(tensors, size=(new_height, new_width), mode='bilinear', align_corners=False)
-        # resized_images = preprocess(images.tensors)
-        # resized_images = resized_images / 255.0
-        # resized_images = torch.clamp(resized_images, 0.0, 1.0)
-        # assert torch.all((resized_images >= 0) & (resized_images <= 1)), "Values are not in range [0, 1]"
-        # yolo_out = detector(resized_images)
-        # print(f"yolo_out: {yolo_out[0].boxes}")
-        out = model(images, targets, detections)
-        step_times['forward'] = time.time() - forward_start_time
-        
-        
+        with autocast():  # 使用 autocast 进行混合精度前向传播
+            out = model(images, targets, detections)
+  
         if not all(len(output) == 0 for output in out):
-            loss_start_time = time.time()
-            loss = criterion(out, targets)
-            step_times['loss_calc'] = time.time() - loss_start_time
-            # print(loss)
-            backward_start_time = time.time()
-            loss.backward()
-            step_times['backward'] = time.time() - backward_start_time
-            
-            optimize_start_time = time.time()
-            optimizer.step()
-            step_times['optimize'] = time.time() - optimize_start_time
+            with autocast():  # 使用 autocast 进行混合精度损失计算
+                loss = criterion(out, targets)
+            if loss > 0:
+                scaler.scale(loss).backward()  # 使用 GradScaler 进行反向传播
+                
+                scaler.step(optimizer)  # 使用 GradScaler 进行优化步骤
+                scaler.update()
         else:
-            loss_start_time = time.time()
             loss = torch.tensor(0.0, device=device)
-            step_times['loss_calc'] = time.time() - loss_start_time
-            step_times['optimize'] = 0.0
         epoch_loss += loss.item()
         
-        # 打印每个batch的时间
-        print(f"Batch {batch_idx + 1}:")
-        print(f"  Data transfer: {step_times['data_transfer']:.4f} seconds")
-        print(f"  Forward pass: {step_times['forward']:.4f} seconds")
-        print(f"  Loss calculation: {step_times['loss_calc']:.4f} seconds")
-        print(f"  Backward pass: {step_times['backward']:.4f} seconds")
-        print(f"  Optimization: {step_times['optimize']:.4f} seconds")
         
         if (batch_idx + 1) % print_freq == 0:
             avg_loss = epoch_loss / (batch_idx + 1)
@@ -316,6 +448,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, pri
     
     return epoch_loss / num_batches
 
+
 @torch.no_grad()
 def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_category_id, device, args):
     model.eval()
@@ -328,6 +461,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     indices = []
     # filename_list = []
     print_freq = 500
+    scaler = GradScaler()  # 初始化 GradScaler
     for samples, targets, detections in metric_logger.log_every(data_loader, print_freq, header):
         # targets: tuple, len(tuple) = batch_size
         #          element in tuple: a dict, whose keys are ['orig_size', 'size', 'boxes', 'labels', 'id', 'hois']
@@ -336,8 +470,8 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
         # print(targets[0]['size'])
         # print('')
         samples = samples.to(device)
-
-        outputs = model(samples, targets, detections)
+        with autocast():  # 使用 autocast 进行混合精度前向传播
+            outputs = model(samples, targets, detections)
         
         results = postprocessors(outputs, targets)
         # print(results)

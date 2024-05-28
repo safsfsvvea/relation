@@ -8,6 +8,191 @@ import torch.nn.functional as F
 from torchvision.ops import roi_align
 import concurrent.futures
 import torch.profiler
+class roi_for(nn.Module):
+    def __init__(self, backbone, device, num_objects=10, feature_dim=768, person_category_id=1, patch_size=14):
+        super(roi_for, self).__init__()
+        self.backbone = backbone
+        self.device = device
+        self.num_objects = num_objects
+        self.feature_dim = feature_dim
+        self.person_category_id = person_category_id
+        self.patch_size = patch_size
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * feature_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 117)  # Assuming 117 relation classes
+        )
+        self.to(self.device)
+
+    def prepare_rois_cpu(self, detections_batch, targets):
+        all_boxes = []
+        all_labels = []
+        all_scores = []
+        image_indices = []
+
+        scale_factor = self.patch_size / 2
+        timings = []
+
+        # torch.cuda.synchronize()
+
+        # # 方法二：张量操作
+        # start_event = torch.cuda.Event(enable_timing=True)
+        # end_event = torch.cuda.Event(enable_timing=True)
+        
+        # start_event.record()
+        # sizes = torch.stack([target['size'] for target in targets])
+        # sizes_on_cpu_2 = sizes.cpu()
+        # end_event.record()
+        
+        # torch.cuda.synchronize()
+        # method_2_time = start_event.elapsed_time(end_event) / 1000.0
+        # timings.append(f"方法二耗时: {method_2_time} 秒")
+        
+        # torch.cuda.synchronize()
+        
+        # # 方法一：列表解析
+        # start_event.record()
+        # sizes_on_cpu_1 = [target['size'].cpu() for target in targets]
+        # end_event.record()
+        
+        # torch.cuda.synchronize()
+        # method_1_time = start_event.elapsed_time(end_event) / 1000.0
+        # timings.append(f"方法一耗时: {method_1_time} 秒")
+
+        def process_image(image_index, detections, target):
+            process_timings = []
+            
+            # start_event = torch.cuda.Event(enable_timing=True)
+            # end_event = torch.cuda.Event(enable_timing=True)
+            
+            # start_event.record()
+            H, W = target['size'].cpu()
+            # end_event.record()
+            # torch.cuda.synchronize()
+            # process_image_time1 = start_event.elapsed_time(end_event) / 1000.0
+            # process_timings.append(f"Process image time1: {process_image_time1}")
+            
+            if not detections['boxes'].nelement():
+                return None, process_timings
+            
+            # start_event.record()
+            boxes = detections['boxes'].cpu()
+            labels = detections['labels'].cpu()
+            scores = detections['scores'].cpu()
+            # end_event.record()
+            # torch.cuda.synchronize()
+            # process_image_time2 = start_event.elapsed_time(end_event) / 1000.0
+            # process_timings.append(f"Process image time2: {process_image_time2}")
+            
+            # start_event.record()
+            cx, cy, bw, bh = boxes.T
+            xmin = (cx - bw / 2) * W
+            ymin = (cy - bh / 2) * H
+            xmax = (cx + bw / 2) * W
+            ymax = (cy + bh / 2) * H
+            # end_event.record()
+            # torch.cuda.synchronize()
+            # process_image_time3 = start_event.elapsed_time(end_event) / 1000.0
+            # process_timings.append(f"Process image time3: {process_image_time3}")
+            
+            # start_event.record()
+            scaled_xmin = xmin / scale_factor
+            scaled_ymin = ymin / scale_factor
+            scaled_xmax = xmax / scale_factor
+            scaled_ymax = ymax / scale_factor
+            # end_event.record()
+            # torch.cuda.synchronize()
+            # process_image_time4 = start_event.elapsed_time(end_event) / 1000.0
+            # process_timings.append(f"Process image time4: {process_image_time4}")
+            
+            # start_event.record()
+            rois = torch.stack([torch.full_like(scaled_ymin, image_index), scaled_ymin, scaled_xmin, scaled_ymax, scaled_xmax], dim=1)
+            # end_event.record()
+            # torch.cuda.synchronize()
+            # process_image_time5 = start_event.elapsed_time(end_event) / 1000.0
+            # process_timings.append(f"Process image time5: {process_image_time5}")
+            
+            return (rois, labels, scores, torch.full((boxes.size(0),), image_index, dtype=torch.int64)), process_timings
+
+        # multi_process_start_time = time.time()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [executor.submit(process_image, image_index, detections, target) 
+                    for image_index, (detections, target) in enumerate(zip(detections_batch, targets))]
+            results = [f.result() for f in futures]
+        # multi_process_time = time.time() - multi_process_start_time
+        # timings.append(f"Multi process time: {multi_process_time}")
+
+        # inside_for_start_time = time.time()
+        for result, process_timings in results:
+            if result is not None:
+                rois, labels, scores, img_indices = result
+                all_boxes.append(rois)
+                all_labels.append(labels)
+                all_scores.append(scores)
+                image_indices.append(img_indices)
+                timings.extend(process_timings)
+        # inside_for_time = time.time() - inside_for_start_time
+
+        # if_start_time = time.time()
+        # torch.cuda.synchronize()
+        if not all_boxes:
+            return torch.empty((0, 5), device=self.device), [], []
+        # torch.cuda.synchronize()
+        # if_time = time.time() - if_start_time
+        # timings.append(f"If time: {if_time}")
+
+        # cat_start_event = torch.cuda.Event(enable_timing=True)
+        # cat_end_event = torch.cuda.Event(enable_timing=True)
+        
+        # cat_start_event.record()
+        rois_tensor = torch.cat(all_boxes)
+        labels_tensor = torch.cat(all_labels)
+        scores_tensor = torch.cat(all_scores)
+        image_indices_tensor = torch.cat(image_indices)
+        # cat_end_event.record()
+        
+        # torch.cuda.synchronize()
+        # cat_time = cat_start_event.elapsed_time(cat_end_event) / 1000.0
+        # timings.append(f"Cat time: {cat_time}")
+
+        # rois_result_start_time = time.time()
+        # torch.cuda.synchronize()
+        detection_counts = [len(detections['boxes']) for detections in detections_batch]
+
+        additional_info = [{'label': label.item(),
+                            'bbox': [roi[2].item() * scale_factor,
+                                    roi[1].item() * scale_factor,
+                                    roi[4].item() * scale_factor,
+                                    roi[3].item() * scale_factor],
+                            'image_index': idx.item(),
+                            'score': score.item()}
+                        for label, roi, idx, score in zip(labels_tensor, rois_tensor, image_indices_tensor, scores_tensor)]
+        # torch.cuda.synchronize()
+        # rois_result_time = time.time() - rois_result_start_time
+        # timings.append(f"RoIs result time: {rois_result_time}")
+
+        # 打印所有计时信息
+        # for timing in timings:
+        #     print(timing)
+        
+        return rois_tensor.float().to(self.device), additional_info, detection_counts
+
+    def forward(self, nested_tensor: NestedTensor, targets, detections_batch):
+        timings = []
+        # 计算ROI时间
+        roi_start_time = time.time()
+        rois, additional_info, detection_counts = self.prepare_rois_cpu(detections_batch, targets)
+        roi_time = time.time() - roi_start_time
+        timings.append(f"ROI time: {roi_time} 秒")
+
+
+        # 打印所有计时信息
+        for timing in timings:
+            print(timing)
+
+        return
 class HOIModel(nn.Module):
     def __init__(self, backbone, device, num_objects=10, feature_dim=768, person_category_id=1, patch_size=14):
         super(HOIModel, self).__init__()
@@ -180,7 +365,7 @@ class HOIModel(nn.Module):
         mask = nested_tensor.mask
         batch_size = images.size(0)
 
-        batch_denoised_features, _, scales = self.backbone(images)
+        batch_denoised_features, _ = self.backbone(images)
 
         batch_denoised_features = batch_denoised_features.permute(0, 3, 1, 2)
         batch_denoised_features = F.interpolate(batch_denoised_features, scale_factor=2, mode='bilinear', align_corners=True)
@@ -238,7 +423,7 @@ class HOIModel(nn.Module):
             if torch.isnan(relation_scores).any():
                     raise ValueError("NaN detected in relation_scores.")
         else:
-            print("No pairs found for this batch.")
+            # print("No pairs found for this batch.")
             return [[] for _ in range(batch_size)]  # Return a list of empty lists, one per image in batch
 
         for i, score in enumerate(relation_scores):
@@ -251,7 +436,7 @@ class HOIModel(nn.Module):
             if start_idx == end_idx:
                 # If there are no results for this image, append an empty list or a placeholder
                 image_hoi_results.append([])
-                print("No results found for this image.")
+                # print("No results found for this image.")
             else:
                 image_hoi_results.append(hoi_results[start_idx:end_idx])
         return image_hoi_results 
@@ -455,7 +640,7 @@ class HOIModel_time(nn.Module):
         end_event = torch.cuda.Event(enable_timing=True)
 
         start_event.record()
-        batch_denoised_features, _, scales = self.backbone(images)
+        batch_denoised_features, _ = self.backbone(images)
         end_event.record()
         torch.cuda.synchronize()
         backbone_time = start_event.elapsed_time(end_event) / 1000.0
@@ -771,7 +956,7 @@ class HOIModel_profiler(nn.Module):
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
             schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler('./logs/log_4'),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler('./logs/log_8'),
             record_shapes=True,
             profile_memory=True,
             with_stack=True
@@ -781,7 +966,7 @@ class HOIModel_profiler(nn.Module):
             end_event = torch.cuda.Event(enable_timing=True)
 
             start_event.record()
-            batch_denoised_features, _, scales = self.backbone(images)
+            batch_denoised_features, _ = self.backbone(images)
             end_event.record()
             torch.cuda.synchronize()
             backbone_time = start_event.elapsed_time(end_event) / 1000.0

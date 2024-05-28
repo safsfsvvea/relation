@@ -57,17 +57,38 @@ class DenoisingVitBackbone(nn.Module):
 
         img = F.interpolate(img, size=img_size, mode='bicubic', align_corners=False)
         return img, (scale_x, scale_y)
-
+    
+    def print_model_device(self):
+        devices = {param.device for param in self.model.parameters()}
+        if len(devices) == 1:
+            device = devices.pop()
+            if device.type == 'cuda':
+                print(f"Model is on CUDA: {device}")
+            else:
+                print(f"Model is on CPU: {device}")
+        else:
+            print(f"Model parameters are on multiple devices: {devices}")
+            
     def forward(self, img):
         # img = nested_tensor.tensors
         # mask = nested_tensor.mask
-        img, scales = self.get_transform(img)
+        # self.print_model_device()
+        # img, scales = self.get_transform(img)
         img = img.to(self.device)
+        # forward_start_event = torch.cuda.Event(enable_timing=True)
+        # forward_end_event = torch.cuda.Event(enable_timing=True)
+        
+        # forward_start_event.record()
         features = self.model(img)
+        # forward_end_event.record()
+                
+        # torch.cuda.synchronize()
+        # time = forward_start_event.elapsed_time(forward_end_event) / 1000.0
+        # print("backbone time: ", time)
         raw_features = features['raw_vit_feats']
         denoised_features = features['pred_denoised_feats']
         # print(denoised_features.requires_grad, raw_features.requires_grad)
-        return denoised_features, raw_features, scales
+        return denoised_features, raw_features
 
     def extract_features(self, img_path):
         img = Image.open(img_path).convert('RGB')
