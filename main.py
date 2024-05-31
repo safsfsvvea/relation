@@ -556,8 +556,8 @@ def main(args):
         dataset_val = build_dataset(image_set='trainset_val', args=args)
         # args.rare_triplets = dataset_val.dataset.rare_triplets
     else:
-        dataset_val = build_dataset(image_set='val', args=args)
-        # dataset_val = build_dataset(image_set='trainset_val', args=args)
+        # dataset_val = build_dataset(image_set='val', args=args)
+        dataset_val = build_dataset(image_set='trainset_val', args=args)
     if args.subset_size > 0:
         print("args.index", args.index)
         if args.random_subset:
