@@ -11,6 +11,7 @@ from torchvision.ops import box_iou
 import torch.nn.functional as F
 import torchvision.transforms as T
 import torch.profiler
+from torch.cuda.amp import GradScaler, autocast  # 添加混合精度相关库
 def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
     model.train()
     start_time = time.time()
@@ -231,7 +232,7 @@ def train_one_epoch_with_time(model, criterion, optimizer, data_loader, device, 
     
     return epoch_loss / num_batches
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
+def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_scheduler=None, print_freq=100, accumulation_steps=32, tensorboard_writer=None):
     # TODO: 优化成RLIP的样子
     model.train()
     # detector.model.train()
@@ -241,62 +242,35 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, pri
     
     progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}")
     
+    scaler = GradScaler()  # 初始化 GradScaler
+    optimizer.zero_grad()
+    has_non_zero_loss = False  # 标志位，跟踪是否有非零损失的累积
+
     for batch_idx, (images, targets, detections) in progress_bar:
-        step_times = {}
-        step_start_time = time.time()
-        
-        transfer_start_time = time.time()
+
         images = images.to(device)
         targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        step_times['data_transfer'] = time.time() - transfer_start_time
         
-        forward_start_time = time.time()
-        optimizer.zero_grad()
-        # tensors = images.tensors
-        # new_height = ((tensors.shape[2] - 1) // 32 + 1) * 32
-        # new_width = ((tensors.shape[3] - 1) // 32 + 1) * 32
-        # preprocess = T.Compose([
-        #     T.Resize((new_height, new_width), interpolation=T.InterpolationMode.BILINEAR),
-        #     T.ToTensor(),
-        #     T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        # ])
-        # resized_images = F.interpolate(tensors, size=(new_height, new_width), mode='bilinear', align_corners=False)
-        # resized_images = preprocess(images.tensors)
-        # resized_images = resized_images / 255.0
-        # resized_images = torch.clamp(resized_images, 0.0, 1.0)
-        # assert torch.all((resized_images >= 0) & (resized_images <= 1)), "Values are not in range [0, 1]"
-        # yolo_out = detector(resized_images)
-        # print(f"yolo_out: {yolo_out[0].boxes}")
-        out = model(images, targets, detections)
-        step_times['forward'] = time.time() - forward_start_time
-        
-        
+        with autocast():  # 使用 autocast 进行混合精度前向传播
+            out = model(images, targets, detections)
+  
         if not all(len(output) == 0 for output in out):
-            loss_start_time = time.time()
-            loss = criterion(out, targets)
-            step_times['loss_calc'] = time.time() - loss_start_time
-            # print(loss)
-            backward_start_time = time.time()
-            loss.backward()
-            step_times['backward'] = time.time() - backward_start_time
-            
-            optimize_start_time = time.time()
-            optimizer.step()
-            step_times['optimize'] = time.time() - optimize_start_time
+            with autocast():  # 使用 autocast 进行混合精度损失计算
+                loss = criterion(out, targets)
+            if loss > 0:
+                loss = loss / accumulation_steps  # 损失均摊到梯度累积步骤数
+                scaler.scale(loss).backward()  # 使用 GradScaler 进行反向传播
+                has_non_zero_loss = True  # 设置标志位
+                
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    scaler.step(optimizer)  # 使用 GradScaler 进行优化步骤
+                    scaler.update()
+                    optimizer.zero_grad()  # 清空梯度
         else:
-            loss_start_time = time.time()
-            loss = torch.tensor(0.0, device=device)
-            step_times['loss_calc'] = time.time() - loss_start_time
-            step_times['optimize'] = 0.0
-        epoch_loss += loss.item()
+            loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
+            scaler.scale(loss).backward()
+        epoch_loss += loss.item() * accumulation_steps  # 还原累计损失
         
-        # 打印每个batch的时间
-        print(f"Batch {batch_idx + 1}:")
-        print(f"  Data transfer: {step_times['data_transfer']:.4f} seconds")
-        print(f"  Forward pass: {step_times['forward']:.4f} seconds")
-        print(f"  Loss calculation: {step_times['loss_calc']:.4f} seconds")
-        print(f"  Backward pass: {step_times['backward']:.4f} seconds")
-        print(f"  Optimization: {step_times['optimize']:.4f} seconds")
         
         if (batch_idx + 1) % print_freq == 0:
             avg_loss = epoch_loss / (batch_idx + 1)
@@ -309,12 +283,19 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, pri
         if tensorboard_writer is not None:
             global_step = epoch * num_batches + batch_idx
             tensorboard_writer.add_scalar('train_loss', loss.item(), global_step=global_step)
+    if (batch_idx + 1) % accumulation_steps != 0 and has_non_zero_loss:
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
     
+    if lr_scheduler is not None:
+        lr_scheduler.step(epoch_loss / num_batches)  # 根据当前 epoch 的平均损失更新学习率
     # 打印训练总时间
     elapsed_time = time.time() - start_time
     print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average loss: {epoch_loss / num_batches:.4f}")
     
     return epoch_loss / num_batches
+
 
 @torch.no_grad()
 def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_category_id, device, args):

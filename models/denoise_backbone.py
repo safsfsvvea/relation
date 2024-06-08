@@ -36,10 +36,13 @@ class DenoisingVitBackbone(nn.Module):
         else:
             model = ViTWrapper(self.model_type, stride=self.patch_size)
         model.to(self.device)
-        model.eval()
         if not self.train_backbone:
+            model.eval()
             for param in model.parameters():
                 param.requires_grad = False
+        else:
+            for param in model.parameters():
+                param.requires_grad = True
         return model
 
     def get_transform(self, img):

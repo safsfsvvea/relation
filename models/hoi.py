@@ -9,7 +9,7 @@ from torchvision.ops import roi_align
 import concurrent.futures
 import torch.profiler
 class HOIModel(nn.Module):
-    def __init__(self, backbone, device, num_objects=10, feature_dim=768, person_category_id=1, patch_size=14):
+    def __init__(self, backbone, device, num_objects=10, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True):
         super(HOIModel, self).__init__()
         self.backbone = backbone
         self.device = device
@@ -17,13 +17,58 @@ class HOIModel(nn.Module):
         self.feature_dim = feature_dim
         self.person_category_id = person_category_id
         self.patch_size = patch_size
-        self.mlp = nn.Sequential(
-            nn.Linear(2 * feature_dim, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 117)  # Assuming 117 relation classes
-        )
+        if not use_LN:
+        #     self.mlp = nn.Sequential(
+        #     nn.Linear(2 * feature_dim, 512),
+        #     nn.ReLU(),
+        #     nn.Linear(512, 256),
+        #     nn.ReLU(),
+        #     nn.Linear(256, 117)  # Assuming 117 relation classes
+        # )
+            self.mlp = nn.Sequential(
+                nn.Linear(2 * feature_dim, 1024),
+                nn.ReLU(),
+                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                nn.Linear(1024, 512),
+                nn.ReLU(),
+                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                nn.Linear(512, 256),
+                nn.ReLU(),
+                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                nn.Linear(128, 64),
+                nn.ReLU(),
+                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                nn.Linear(64, 117)  # Assuming 117 relation classes
+            )
+        else:
+            print("use deep mlp")
+            self.mlp = nn.Sequential(
+                nn.Linear(2 * feature_dim, 1024),
+                nn.LayerNorm(1024),  # 添加 LayerNorm 层
+                nn.ReLU(),
+                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                nn.Linear(1024, 512),
+                nn.LayerNorm(512),  # 添加 LayerNorm 层
+                nn.ReLU(),
+                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                nn.Linear(512, 256),
+                nn.LayerNorm(256),  # 添加 LayerNorm 层
+                nn.ReLU(),
+                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                nn.Linear(256, 128),
+                nn.LayerNorm(128),  # 添加 LayerNorm 层
+                nn.ReLU(),
+                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                nn.Linear(128, 64),
+                nn.LayerNorm(64),  # 添加 LayerNorm 层
+                nn.ReLU(),
+                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                nn.Linear(64, 117)  # 假设有 117 个类别
+            )
+
         self.to(self.device)
 
     def prepare_rois_cpu(self, detections_batch, targets):
@@ -175,7 +220,6 @@ class HOIModel(nn.Module):
         return separated_features, separated_additional_info
     
     def forward(self, nested_tensor: NestedTensor , targets, detections_batch):
-        # print("targets[0]: ", targets[0])
         images = nested_tensor.tensors
         mask = nested_tensor.mask
         batch_size = images.size(0)
@@ -189,7 +233,7 @@ class HOIModel(nn.Module):
         rois, additional_info, detection_counts= self.prepare_rois_cpu(detections_batch, targets)
 
         output_size = (1, 1)
-        # print("batch_denoised_features shape: ", batch_denoised_features.shape)
+
         pooled_features = roi_align(batch_denoised_features, rois, output_size)
 
         separated_features, separated_additional_info = self.separate_pooled_features(pooled_features, additional_info, detection_counts)
@@ -238,7 +282,7 @@ class HOIModel(nn.Module):
             if torch.isnan(relation_scores).any():
                     raise ValueError("NaN detected in relation_scores.")
         else:
-            print("No pairs found for this batch.")
+            # print("No pairs found for this batch.")
             return [[] for _ in range(batch_size)]  # Return a list of empty lists, one per image in batch
 
         for i, score in enumerate(relation_scores):
@@ -251,7 +295,7 @@ class HOIModel(nn.Module):
             if start_idx == end_idx:
                 # If there are no results for this image, append an empty list or a placeholder
                 image_hoi_results.append([])
-                print("No results found for this image.")
+                # print("No results found for this image.")
             else:
                 image_hoi_results.append(hoi_results[start_idx:end_idx])
         return image_hoi_results 
@@ -1248,7 +1292,9 @@ class CriterionHOI(nn.Module):
     def focal_loss(self, inputs, targets):
         """ 计算Focal Loss，用于处理类别不平衡问题 """
         bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        # print("inputs: ", inputs)
         probas = torch.sigmoid(inputs)
+        # print("probas: ", probas)
         loss = self.alpha * (1 - probas) ** self.gamma * bce_loss
         return loss.mean()
     

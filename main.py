@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.tensorboard import SummaryWriter
 import os
 from torch.utils.data import Subset
@@ -32,6 +33,7 @@ def get_args_parser():
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
     parser.add_argument('--text_encoder_lr', default=5e-5, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
+    parser.add_argument('--accumulation_steps', default=32, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=150, type=int)
     parser.add_argument('--lr_drop', default=100, type=int)
@@ -57,6 +59,9 @@ def get_args_parser():
                         help='Unfreeze partial parameters.')
     parser.add_argument('--frozen_detection', action = 'store_true',
                         help='Freeze object detection part for RLIP.')
+
+    #mlp
+    parser.add_argument('--use_LN', action='store_true', help='use LayerNorm.')
 
 
     # * Backbone
@@ -428,6 +433,7 @@ def get_args_parser():
     
 
     # dataset parameters
+    parser.add_argument('--trainset_val', action='store_true', help='Use trainset validation')
     parser.add_argument('--index', default=None, type=int, help='index for test')
     parser.add_argument('--num_folds', default=5, type=int, help='Number of folds for cross validation')
     parser.add_argument('--do_cross_validation', action='store_true', help='Use cross validation')
@@ -477,6 +483,8 @@ def get_args_parser():
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
+    parser.add_argument('--log_dir', default='logs/test',
+                        help='path for tensdorboard logs')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=42, type=int)
@@ -503,15 +511,18 @@ def ensure_dir(directory):
 
 def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    train_backbone = False
+    if args.lr_backbone > 0:
+        train_backbone = True
     backbone = DenoisingVitBackbone(
         model_type="vit_base_patch14_dinov2.lvd142m", device=device, checkpoint_path=args.pretrained_backbone,
-        denoised=True
+        denoised=True, train_backbone=train_backbone
     )
     # detector = YOLO("checkpoints/yolov8m.pt").to(device)
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel_profiler(backbone, device=device)
+    model = HOIModel(backbone, device=device, use_LN=args.use_LN)
     matcher = HungarianMatcherHOI_det(
         device=device,
         cost_obj_class=args.set_cost_obj_class,
@@ -524,10 +535,26 @@ def main(args):
     # {'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr},
     # {'params': filter(lambda p: p.requires_grad, detector.parameters()), 'lr': args.lr_detector},
     # ], weight_decay=args.weight_decay)
-    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
-                                  weight_decay=args.weight_decay)
-    print("Number of parameters in optimizer model:", len(list(optimizer.param_groups[0]['params'])))
-    # print("Number of parameters in optimizer detector:", len(list(optimizer.param_groups[1]['params'])))
+    if train_backbone == True: 
+        print("Number of backbone parameters before optimizer:", sum(p.numel() for p in model.backbone.parameters()))
+        print("Number of mlp parameters before optimizer:", sum(p.numel() for p in model.mlp.parameters()))
+        optimizer = torch.optim.AdamW([
+        {'params': model.backbone.parameters(), 'lr': args.lr_backbone},
+        {'params': model.mlp.parameters(), 'lr': args.lr}
+        ], weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
+                                    weight_decay=args.weight_decay)
+    lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, threshold=0.0001, min_lr=1e-6)
+    print("Number of parameter tensors in optimizer backbone:", len(list(optimizer.param_groups[0]['params'])))
+    print("Number of parameter tensors in optimizer mlp:", len(list(optimizer.param_groups[1]['params'])))
+    # 打印优化器中backbone参数的总数
+    backbone_params_count = sum(p.numel() for p in optimizer.param_groups[0]['params'])
+    print("Total number of parameters in optimizer backbone:", backbone_params_count)
+
+    # 打印优化器中mlp参数的总数
+    mlp_params_count = sum(p.numel() for p in optimizer.param_groups[1]['params'])
+    print("Total number of parameters in optimizer mlp:", mlp_params_count)
     postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
     if args.pretrained:
         print(f"Loading pretrained model from {args.pretrained}")
@@ -543,10 +570,13 @@ def main(args):
         dataset_val = build_dataset(image_set='trainset_val', args=args)
         # args.rare_triplets = dataset_val.dataset.rare_triplets
     else:
-        # dataset_val = build_dataset(image_set='val', args=args)
-        dataset_val = build_dataset(image_set='trainset_val', args=args)
+        if not args.trainset_val:
+            dataset_val = build_dataset(image_set='val', args=args)
+        else:
+            print("using trainset val!!!!!!")
+            dataset_val = build_dataset(image_set='trainset_val', args=args)
     if args.subset_size > 0:
-        print("args.index", args.index)
+        # print("args.index", args.index)
         if args.random_subset:
             subset_indices = np.random.choice(len(dataset_train), args.subset_size, replace=False)
         elif args.index is not None:
@@ -651,13 +681,16 @@ def main(args):
             test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
             return
         
-        tensorboard_writer = SummaryWriter(log_dir='logs')
+        tensorboard_writer = SummaryWriter(log_dir=args.log_dir)
         num_epochs = args.epochs
+        best_loss = float('inf')
+        best_epoch = -1
+        best_map = 0
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss = train_one_epoch_with_time(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
-            if args.output_dir and epoch % 10 == 0:
+            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
+            if args.output_dir and epoch % 2 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                 checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
                 checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
@@ -669,16 +702,45 @@ def main(args):
                 }, filename=checkpoint_filename)
                 
                 print(f"Checkpoint saved to {checkpoint_filename}")
-        checkpoint_filename = f"checkpoint.pth.tar"
-        checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
-        save_checkpoint({
-            'epoch': num_epochs,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'loss': train_loss,
-        }, filename=checkpoint_filename)
-        
-        print(f"Checkpoint saved to {checkpoint_filename}")
+            if train_loss < best_loss:
+                best_loss = train_loss
+                best_epoch = epoch
+                
+                # 保存最小损失模型
+                best_model_filename = os.path.join(args.output_dir, "best_model.pth.tar")
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'loss': train_loss,
+                }, filename=best_model_filename)
+                
+                print(f"Best model saved to {best_model_filename} at epoch {epoch}")
+            if epoch % 5 == 0 or epoch == num_epochs - 1:
+                test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
+                tensorboard_writer.add_scalar('Test/mAP', test_stats['mAP'], epoch)
+                
+                if test_stats['mAP'] > best_map:
+                    best_map = test_stats['mAP']
+                    best_map_model_filename = os.path.join(args.output_dir, "best_map_model.pth.tar")
+                    save_checkpoint({
+                        'epoch': epoch + 1,
+                        'state_dict': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'loss': train_loss,
+                        'mAP': test_stats['mAP'],
+                    }, filename=best_map_model_filename)
+                    print(f"Best mAP model saved to {best_map_model_filename} with mAP {best_map} at epoch {epoch}")
+            checkpoint_filename = f"checkpoint.pth.tar"
+            checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
+            save_checkpoint({
+                'epoch': num_epochs,
+                'state_dict': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'loss': train_loss,
+            }, filename=checkpoint_filename)
+            
+            print(f"Checkpoint saved to {checkpoint_filename}")
         
         elapsed_time = time.time() - start_time
         print(f"Training completed in {elapsed_time:.2f} seconds")
