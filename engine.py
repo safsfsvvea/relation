@@ -240,6 +240,9 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     epoch_loss = 0.0
     num_batches = len(data_loader)
     
+    no_pairs_batches = 0  # 用于统计 "No pairs found for this batch." 出现的 batch 数量
+    no_results_images = 0  # 用于统计 "No results found for this image." 出现的图片数量
+    total_images = 0  # 用于统计总的图片数量
     progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}")
     
     scaler = GradScaler()  # 初始化 GradScaler
@@ -271,6 +274,9 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
             scaler.scale(loss).backward()
         epoch_loss += loss.item() * accumulation_steps  # 还原累计损失
         
+        no_pairs_batches += model.no_pairs_count
+        no_results_images += model.no_results_count
+        total_images += len(targets)  # 更新总的图片数量
         
         if (batch_idx + 1) % print_freq == 0:
             avg_loss = epoch_loss / (batch_idx + 1)
@@ -278,6 +284,9 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
             eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
             
             progress_bar.set_postfix(loss=f"{avg_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")
+        
+        model.no_pairs_count = 0  # 重置计数器
+        model.no_results_count = 0  # 重置计数器
         
         # 保存训练中间信息到tensorboard
         if tensorboard_writer is not None:
@@ -294,11 +303,20 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     elapsed_time = time.time() - start_time
     print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average loss: {epoch_loss / num_batches:.4f}")
     
+    no_pairs_ratio = no_pairs_batches / num_batches
+    no_results_ratio = no_results_images / total_images
+
+    print(f"No pairs found ratio: {no_pairs_ratio:.4f}")
+    print(f"No results found ratio: {no_results_ratio:.4f}")
+
+    if tensorboard_writer is not None:
+        tensorboard_writer.add_scalar('no_pairs_ratio', no_pairs_ratio, epoch)
+        tensorboard_writer.add_scalar('no_results_ratio', no_results_ratio, epoch)
     return epoch_loss / num_batches
 
 
 @torch.no_grad()
-def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_category_id, device, args):
+def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_category_id, device, args, criterion=None):
     model.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -319,7 +337,9 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
         samples = samples.to(device)
 
         outputs = model(samples, targets, detections)
-        
+        # print("outputs: ", outputs)
+        # loss = criterion(outputs, targets)
+        # print("loss: ", loss)
         results = postprocessors(outputs, targets)
         # print(results)
         # print(len(list(itertools.chain.from_iterable(utils.all_gather(results)))))
@@ -373,6 +393,14 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
 
         # 假设 preds[0]['verb_scores'] 是 PyTorch 张量
         logits = preds[0]['verb_scores']
+        verb_labels = torch.zeros((1,117), device='cuda:0')
+        verb_labels[0][gts[0]['hois'][:, 2]] = 1
+
+        print("One-hot encoded verb_labels:", verb_labels)
+        focal_loss = criterion.focal_loss(logits, verb_labels)
+        bce_loss = criterion.bce_loss(logits, verb_labels)
+        print("focal loss: ", focal_loss)
+        print("bce loss: ", bce_loss)
         # 转换 logits 为概率
         probabilities = F.softmax(logits, dim=1)
 

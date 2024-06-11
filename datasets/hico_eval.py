@@ -115,7 +115,11 @@ class HICOEvaluator():
         self.fp_dict = []
 
     def evaluate(self):
+        # print("self.preds: ", self.preds)
+        # print("self.gts: ", self.gts)
         for img_preds, img_gts in zip(self.preds, self.gts):
+            # print("img_preds: ", img_preds)
+            # print("img_gts: ", img_gts)
             pred_bboxes = img_preds['predictions']
             gt_bboxes = img_gts['annotations']
             # print('pred_bboxes:'+ str(len(pred_bboxes))) # 200

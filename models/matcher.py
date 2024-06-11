@@ -48,7 +48,7 @@ class HungarianMatcherHOI_det(nn.Module):
             pred_obj_labels = torch.tensor([p['object_category'] for p in pred], device=self.device)
             pred_verb_scores = torch.stack([torch.tensor(p['relation_score'], device=self.device) for p in pred])
             # pred_verb_scores = torch.stack([torch.tensor(p['relation_score'], device=self.device).clone().detach() for p in pred])
-
+            # print("tgt: ", tgt)
             tgt_sub_boxes = tgt['sub_boxes'].to(self.device)
             tgt_obj_boxes = tgt['obj_boxes'].to(self.device)
             tgt_obj_labels = tgt['obj_labels'].to(self.device)

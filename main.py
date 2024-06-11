@@ -405,7 +405,7 @@ def get_args_parser():
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
-    parser.add_argument('--set_cost_obj_class', default=1, type=float,
+    parser.add_argument('--set_cost_obj_class', default=5, type=float,
                         help="Object class coefficient in the matching cost")
     parser.add_argument('--set_cost_verb_class', default=1, type=float,
                         help="Verb class coefficient in the matching cost")
@@ -542,19 +542,24 @@ def main(args):
         {'params': model.backbone.parameters(), 'lr': args.lr_backbone},
         {'params': model.mlp.parameters(), 'lr': args.lr}
         ], weight_decay=args.weight_decay)
+        print("Number of parameter tensors in optimizer backbone:", len(list(optimizer.param_groups[0]['params'])))
+        print("Number of parameter tensors in optimizer mlp:", len(list(optimizer.param_groups[1]['params'])))
+        # 打印优化器中backbone参数的总数
+        backbone_params_count = sum(p.numel() for p in optimizer.param_groups[0]['params'])
+        print("Total number of parameters in optimizer backbone:", backbone_params_count)
+
+        # 打印优化器中mlp参数的总数
+        mlp_params_count = sum(p.numel() for p in optimizer.param_groups[1]['params'])
+        print("Total number of parameters in optimizer mlp:", mlp_params_count)
     else:
         optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
                                     weight_decay=args.weight_decay)
+        print("Number of parameter tensors in optimizer mlp:", len(list(optimizer.param_groups[0]['params'])))
+        # 打印优化器中mlp参数的总数
+        mlp_params_count = sum(p.numel() for p in optimizer.param_groups[0]['params'])
+        print("Total number of parameters in optimizer mlp:", mlp_params_count)
     lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, threshold=0.0001, min_lr=1e-6)
-    print("Number of parameter tensors in optimizer backbone:", len(list(optimizer.param_groups[0]['params'])))
-    print("Number of parameter tensors in optimizer mlp:", len(list(optimizer.param_groups[1]['params'])))
-    # 打印优化器中backbone参数的总数
-    backbone_params_count = sum(p.numel() for p in optimizer.param_groups[0]['params'])
-    print("Total number of parameters in optimizer backbone:", backbone_params_count)
-
-    # 打印优化器中mlp参数的总数
-    mlp_params_count = sum(p.numel() for p in optimizer.param_groups[1]['params'])
-    print("Total number of parameters in optimizer mlp:", mlp_params_count)
+    
     postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
     if args.pretrained:
         print(f"Loading pretrained model from {args.pretrained}")
@@ -678,7 +683,7 @@ def main(args):
         if args.output_dir:
             ensure_dir(args.output_dir)
         if args.hoi and args.eval:
-            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
+            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
             return
         
         tensorboard_writer = SummaryWriter(log_dir=args.log_dir)
@@ -717,7 +722,7 @@ def main(args):
                 
                 print(f"Best model saved to {best_model_filename} at epoch {epoch}")
             if epoch % 5 == 0 or epoch == num_epochs - 1:
-                test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args)
+                test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
                 tensorboard_writer.add_scalar('Test/mAP', test_stats['mAP'], epoch)
                 
                 if test_stats['mAP'] > best_map:

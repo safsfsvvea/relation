@@ -5,7 +5,7 @@ from util.misc import NestedTensor
 import time
 import torch
 import torch.nn.functional as F
-from torchvision.ops import roi_align
+from torchvision.ops import roi_align, sigmoid_focal_loss
 import concurrent.futures
 import torch.profiler
 class HOIModel(nn.Module):
@@ -17,6 +17,8 @@ class HOIModel(nn.Module):
         self.feature_dim = feature_dim
         self.person_category_id = person_category_id
         self.patch_size = patch_size
+        self.no_pairs_count = 0  # 用于统计 "No pairs found for this batch." 的计数
+        self.no_results_count = 0  # 用于统计 "No results found for this image." 的计数
         if not use_LN:
         #     self.mlp = nn.Sequential(
         #     nn.Linear(2 * feature_dim, 512),
@@ -282,13 +284,15 @@ class HOIModel(nn.Module):
             if torch.isnan(relation_scores).any():
                     raise ValueError("NaN detected in relation_scores.")
         else:
-            # print("No pairs found for this batch.")
+            self.no_pairs_count += 1  # 统计 "No pairs found for this batch."
+            print("No pairs found for this batch.")
             return [[] for _ in range(batch_size)]  # Return a list of empty lists, one per image in batch
 
         for i, score in enumerate(relation_scores):
             hoi_results[i]['relation_score'] = score
         # Organize results per image
         image_hoi_results  = []
+        assert len(pair_start_indices) == batch_size, "len(pair_start_indices) != batch_size"
         for i in range(len(pair_start_indices)):
             start_idx = pair_start_indices[i]
             end_idx = pair_start_indices[i+1] if i+1 < len(pair_start_indices) else len(relation_scores)
@@ -296,6 +300,8 @@ class HOIModel(nn.Module):
                 # If there are no results for this image, append an empty list or a placeholder
                 image_hoi_results.append([])
                 # print("No results found for this image.")
+                # print(f"GT for image {i}: {targets[i]}")
+                self.no_results_count += 1  # 统计 "No results found for this image."
             else:
                 image_hoi_results.append(hoi_results[start_idx:end_idx])
         return image_hoi_results 
@@ -1291,12 +1297,17 @@ class CriterionHOI(nn.Module):
 
     def focal_loss(self, inputs, targets):
         """ 计算Focal Loss，用于处理类别不平衡问题 """
-        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        loss = sigmoid_focal_loss(inputs, targets, alpha=self.alpha, gamma=self.gamma, reduction='mean')
+        # print("focal_loss: ", loss)
+        return loss
         # print("inputs: ", inputs)
-        probas = torch.sigmoid(inputs)
-        # print("probas: ", probas)
-        loss = self.alpha * (1 - probas) ** self.gamma * bce_loss
-        return loss.mean()
+        # print("targets: ", targets)
+        # bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        # print("bce_loss: ", bce_loss)
+        # probas = torch.sigmoid(inputs)
+        # # print("probas: ", probas)
+        # loss = self.alpha * (1 - probas) ** self.gamma * bce_loss
+        # return loss.mean()
     
     def bce_loss(self, inputs, targets):
         """ 计算二元交叉熵损失 """
