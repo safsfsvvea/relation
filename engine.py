@@ -243,6 +243,11 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     no_pairs_batches = 0  # 用于统计 "No pairs found for this batch." 出现的 batch 数量
     no_results_images = 0  # 用于统计 "No results found for this image." 出现的图片数量
     total_images = 0  # 用于统计总的图片数量
+    subject_label_mismatches = 0
+    object_label_mismatches = 0
+    subject_box_mismatches = 0
+    object_box_mismatches = 0
+    total_pairs = 0  # 总的 matcher pairs 数量
     progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}")
     
     scaler = GradScaler()  # 初始化 GradScaler
@@ -278,6 +283,12 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         no_results_images += model.no_results_count
         total_images += len(targets)  # 更新总的图片数量
         
+        subject_label_mismatches += criterion.subject_label_mismatch
+        object_label_mismatches += criterion.object_label_mismatch
+        subject_box_mismatches += criterion.subject_box_mismatch
+        object_box_mismatches += criterion.object_box_mismatch
+        total_pairs += criterion.total_pairs
+        
         if (batch_idx + 1) % print_freq == 0:
             avg_loss = epoch_loss / (batch_idx + 1)
             elapsed_time = time.time() - start_time
@@ -287,6 +298,12 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         
         model.no_pairs_count = 0  # 重置计数器
         model.no_results_count = 0  # 重置计数器
+        
+        criterion.subject_label_mismatch = 0
+        criterion.object_label_mismatch = 0
+        criterion.subject_box_mismatch = 0
+        criterion.object_box_mismatch = 0
+        criterion.total_pairs = 0
         
         # 保存训练中间信息到tensorboard
         if tensorboard_writer is not None:
@@ -305,13 +322,28 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     
     no_pairs_ratio = no_pairs_batches / num_batches
     no_results_ratio = no_results_images / total_images
-
+    
+    subject_label_mismatch_ratio = subject_label_mismatches / total_pairs if total_pairs else 0
+    object_label_mismatch_ratio = object_label_mismatches / total_pairs if total_pairs else 0
+    subject_box_mismatch_ratio = subject_box_mismatches / total_pairs if total_pairs else 0
+    object_box_mismatch_ratio = object_box_mismatches / total_pairs if total_pairs else 0
+    
     print(f"No pairs found ratio: {no_pairs_ratio:.4f}")
     print(f"No results found ratio: {no_results_ratio:.4f}")
+    
+    print(f"Subject label mismatch ratio: {subject_label_mismatch_ratio:.4f}")
+    print(f"Object label mismatch ratio: {object_label_mismatch_ratio:.4f}")
+    print(f"Subject box mismatch ratio: {subject_box_mismatch_ratio:.4f}")
+    print(f"Object box mismatch ratio: {object_box_mismatch_ratio:.4f}")
 
     if tensorboard_writer is not None:
         tensorboard_writer.add_scalar('no_pairs_ratio', no_pairs_ratio, epoch)
         tensorboard_writer.add_scalar('no_results_ratio', no_results_ratio, epoch)
+        
+        tensorboard_writer.add_scalar('subject_label_mismatch_ratio', subject_label_mismatch_ratio, epoch)
+        tensorboard_writer.add_scalar('object_label_mismatch_ratio', object_label_mismatch_ratio, epoch)
+        tensorboard_writer.add_scalar('subject_box_mismatch_ratio', subject_box_mismatch_ratio, epoch)
+        tensorboard_writer.add_scalar('object_box_mismatch_ratio', object_box_mismatch_ratio, epoch)
     return epoch_loss / num_batches
 
 

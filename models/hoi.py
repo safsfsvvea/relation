@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from torchvision.ops import roi_align, sigmoid_focal_loss
 import concurrent.futures
 import torch.profiler
+from util.box_ops import box_cxcywh_to_xyxy
+
 class HOIModel(nn.Module):
     def __init__(self, backbone, device, num_objects=10, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True):
         super(HOIModel, self).__init__()
@@ -112,7 +114,7 @@ class HOIModel(nn.Module):
             scaled_ymax = ymax / scale_factor
             
             # 收集转换后的边界框和对应的批次索引
-            rois = torch.stack([torch.full_like(scaled_ymin, image_index), scaled_ymin, scaled_xmin, scaled_ymax, scaled_xmax], dim=1)
+            rois = torch.stack([torch.full_like(scaled_ymin, image_index), scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
 
             return rois, labels, scores, torch.full((boxes.size(0),), image_index, dtype=torch.int64)
 
@@ -140,7 +142,7 @@ class HOIModel(nn.Module):
         # 记录每张图片的检测框数量
         detection_counts = [len(detections['boxes']) for detections in detections_batch]
 
-        additional_info = [{'label': label.item(), 'bbox': [roi[2].item() * scale_factor, roi[1].item() * scale_factor, roi[4].item() * scale_factor, roi[3].item() * scale_factor], 'image_index': idx.item(), 'score': score.item()}
+        additional_info = [{'label': label.item(), 'bbox': [roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor, roi[4].item() * scale_factor], 'image_index': idx.item(), 'score': score.item()}
                         for label, roi, idx, score in zip(labels_tensor, rois_tensor, image_indices_tensor, scores_tensor)]
 
         return rois_tensor.float().to(self.device), additional_info, detection_counts
@@ -299,8 +301,8 @@ class HOIModel(nn.Module):
             if start_idx == end_idx:
                 # If there are no results for this image, append an empty list or a placeholder
                 image_hoi_results.append([])
-                # print("No results found for this image.")
-                # print(f"GT for image {i}: {targets[i]}")
+                print("No results found for this image.")
+                print(f"GT for image {i}: {targets[i]}")
                 self.no_results_count += 1  # 统计 "No results found for this image."
             else:
                 image_hoi_results.append(hoi_results[start_idx:end_idx])
@@ -1236,6 +1238,12 @@ class CriterionHOI(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
         self.loss_type = loss_type
+        # 初始化不匹配计数器
+        self.subject_label_mismatch = 0
+        self.object_label_mismatch = 0
+        self.subject_box_mismatch = 0
+        self.object_box_mismatch = 0
+        self.total_pairs = 0
         
     def forward(self, outputs, targets):
         """
@@ -1249,20 +1257,23 @@ class CriterionHOI(nn.Module):
         """
         # 使用匹配器找到最优匹配
         matched_indices = self.matcher(outputs, targets)
-        
+        # print("matched_indices: ", matched_indices)
         batch_loss = 0.0
         num_processed = 0  # 记录参与损失计算的图像数
-
+        # print("len(outputs)", len(outputs))
+        # print("len(targets)", len(targets))
+        
         for idx, (pred, tgt) in enumerate(zip(outputs, targets)):
             if len(pred) == 0:
                 # 如果当前图像没有预测结果，跳过此图像的损失计算
                 continue
-
+            # print("pred: ", pred)
+            # print("tgt: ", tgt)
             sub_inds, obj_inds = matched_indices[idx]
             if len(sub_inds) == 0 or len(obj_inds) == 0:
                 # 如果没有有效匹配，也跳过此图像
                 continue
-
+            
             matched_pred_verb_scores = []
             matched_tgt_verb_labels = []
 
@@ -1270,7 +1281,34 @@ class CriterionHOI(nn.Module):
                 # 收集所有匹配对的预测logits和目标labels
                 matched_pred_verb_scores.append(pred[sub_idx]['relation_score'])
                 matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx])
-
+                pred_subject = pred[sub_idx]
+                pred_object = pred[obj_idx]
+                tgt_subject = tgt['sub_labels'][obj_idx]
+                tgt_object = tgt['obj_labels'][obj_idx]
+                H, W = tgt['size']
+                tgt_sub_boxes = box_cxcywh_to_xyxy(tgt['sub_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
+                tgt_obj_boxes = box_cxcywh_to_xyxy(tgt['obj_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
+                self.total_pairs += 1
+                try:
+                    assert pred_subject['subject_category'] - 1 == tgt_subject.item(), f"Subject labels do not match: pred {pred_subject['subject_category']-1}, tgt {tgt_subject.item()}"
+                except AssertionError as e:
+                    print(f"AssertionError: {e}")
+                    self.subject_label_mismatch += 1
+                try:
+                    assert pred_object['object_category'] - 1 == tgt_object.item(), f"Object labels do not match: pred {pred_object['object_category']}, tgt {tgt_object.item()}"
+                except AssertionError as e:
+                    print(f"AssertionError: {e}")
+                    self.object_label_mismatch += 1
+                try:
+                    assert torch.allclose(torch.tensor(pred_subject['subject_bbox'], device=self.device), tgt_sub_boxes), f"Subject boxes do not match: pred {pred_subject['subject_bbox']}, tgt {tgt_sub_boxes}"
+                except AssertionError as e:
+                    print(f"AssertionError: {e}")
+                    self.subject_box_mismatch += 1
+                try:
+                    assert torch.allclose(torch.tensor(pred_object['object_bbox'], device=self.device), tgt_obj_boxes), f"Object boxes do not match: pred {pred_object['object_bbox']}, tgt {tgt_obj_boxes}"
+                except AssertionError as e:
+                    print(f"AssertionError: {e}")
+                    self.object_box_mismatch += 1
             if matched_pred_verb_scores:
                 # matched_pred_verb_scores = torch.stack(matched_pred_verb_scores)
                 # matched_tgt_verb_labels = torch.stack(matched_tgt_verb_labels)

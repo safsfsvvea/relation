@@ -433,6 +433,7 @@ def get_args_parser():
     
 
     # dataset parameters
+    parser.add_argument('--notransform', action='store_true', help='not use transform in debug')
     parser.add_argument('--trainset_val', action='store_true', help='Use trainset validation')
     parser.add_argument('--index', default=None, type=int, help='index for test')
     parser.add_argument('--num_folds', default=5, type=int, help='Number of folds for cross validation')
@@ -694,8 +695,8 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
-            if args.output_dir and epoch % 2 == 0:
+            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=None, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
+            if args.output_dir and epoch % 5 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                 checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
                 checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
