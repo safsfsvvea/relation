@@ -37,6 +37,7 @@ class HICOEvaluator():
 
         self.preds = []
         for index, img_preds in enumerate(preds):
+            # print("img_preds: ", img_preds)
             if img_preds:
                 img_preds = {k: v.to('cpu').numpy() for k, v in img_preds.items()}
                 bboxes = [{'bbox': bbox, 'category_id': label} for bbox, label in zip(img_preds['boxes'], img_preds['labels'])]
@@ -58,6 +59,10 @@ class HICOEvaluator():
                 if len(subject_ids) > 0:
                     object_labels = np.array([bboxes[object_id]['category_id'] for object_id in object_ids])
                     masks = correct_mat[verb_labels, object_labels]  # [11700, ]
+                    # print("Original hoi_scores:", hoi_scores)
+                    # print("Verb labels before filtering:", verb_labels)
+                    # print("Object labels before filtering:", object_labels)
+                    # print("Masks used for filtering:", masks)
                     # print("verb_labels: ", verb_labels)
                     # print("object_labels: ", object_labels)
                     # print("len object_labels: ", len(object_labels))
@@ -66,16 +71,26 @@ class HICOEvaluator():
                     # print("masks shape: ", masks.shape)
                     # print("masks: ", masks)
                     hoi_scores *= masks
+                    # print("Filtered hoi_scores:", hoi_scores)
+                    # print("Filtered hoi_scores len:", len(hoi_scores))
+                    # print("Filtered hoi_scores[15]:", hoi_scores[15])
                     # The above step filters the hois that are in the correct map, 
                     # otherwise the score will be multiplied to zero. 
 
                     hois = [{'subject_id': subject_id, 'object_id': object_id, 'category_id': category_id, 'score': score} for
                             subject_id, object_id, category_id, score in zip(subject_ids, object_ids, verb_labels, hoi_scores)]
+                    # print("hois before sort: ", hois)
+                    # print("hois before sort len: ", len(hois))
                     # len of hois: [11700,]
                     hois.sort(key=lambda k: (k.get('score', 0)), reverse=True)  # get(key, default)
+                    # print("hois after sort: ", hois)
+                    # print("hois after sort len: ", len(hois))
                     # print("len hois: ", len(hois))
                     # Sort the list of dicts according to the value of the 'score'
                     hois = hois[:self.max_hois]
+                    # print("self.max_hois: ", self.max_hois)
+                    # print("hois after clip: ", hois)
+                    # print("hois after clip len: ", len(hois))
                 else:
                     hois = []
             else:
@@ -86,12 +101,12 @@ class HICOEvaluator():
                 'filename':filename,
                 'predictions': bboxes,
                 'hoi_prediction': hois})
-        # print("self.preds: ", self.preds)
+        # print("self.preds before nms: ", self.preds)
         # print("len(self.preds[0]['hoi_prediction']: ", len(self.preds[0]['hoi_prediction']))
         if self.use_nms_filter:
             print('Starting NMS...')
             self.preds = self.triplet_nms_filter(self.preds)
-
+        # print("self.preds after nms: ", self.preds)
         self.gts = []
         for img_gts in gts:
             filename = img_gts['filename']

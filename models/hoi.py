@@ -11,7 +11,7 @@ import torch.profiler
 from util.box_ops import box_cxcywh_to_xyxy
 
 class HOIModel(nn.Module):
-    def __init__(self, backbone, device, num_objects=10, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True):
         super(HOIModel, self).__init__()
         self.backbone = backbone
         self.device = device
@@ -88,7 +88,7 @@ class HOIModel(nn.Module):
         all_scores = []
         image_indices = []
 
-        scale_factor = self.patch_size / 2  # 根据您的指示计算缩放因子
+        scale_factor = self.patch_size / 2  
 
         
         def process_image(image_index, detections, target):
@@ -107,7 +107,6 @@ class HOIModel(nn.Module):
             xmax = (cx + bw / 2) * W
             ymax = (cy + bh / 2) * H
             
-            # 根据您的建议进行缩放
             scaled_xmin = xmin / scale_factor
             scaled_ymin = ymin / scale_factor
             scaled_xmax = xmax / scale_factor
@@ -227,7 +226,7 @@ class HOIModel(nn.Module):
         images = nested_tensor.tensors
         mask = nested_tensor.mask
         batch_size = images.size(0)
-
+        # print("detections_batch: ", detections_batch)
         batch_denoised_features, _, scales = self.backbone(images)
 
         batch_denoised_features = batch_denoised_features.permute(0, 3, 1, 2)
@@ -266,6 +265,8 @@ class HOIModel(nn.Module):
             
             pair_start_indices.append(current_index)
             # 生成所有有效的 human-object pairs
+            # print("len(human_features): ", len(human_features))
+            # print("len(object_features): ", len(object_features))
             for human in human_features:
                 for obj in object_features:
                     combined_feature = torch.cat([human[0], obj[0]], dim=0)
@@ -301,8 +302,8 @@ class HOIModel(nn.Module):
             if start_idx == end_idx:
                 # If there are no results for this image, append an empty list or a placeholder
                 image_hoi_results.append([])
-                print("No results found for this image.")
-                print(f"GT for image {i}: {targets[i]}")
+                # print("No results found for this image.")
+                # print(f"GT for image {i}: {targets[i]}")
                 self.no_results_count += 1  # 统计 "No results found for this image."
             else:
                 image_hoi_results.append(hoi_results[start_idx:end_idx])
@@ -1149,9 +1150,10 @@ class HOIModel_old(nn.Module):
         return image_hoi_results 
 
 class PostProcessHOI(nn.Module):
-    def __init__(self, relation_threshold=0.5, device='cuda'):
+    def __init__(self, relation_threshold=0.0, device='cuda'):
         super().__init__()
         self.relation_threshold = relation_threshold
+        print("self.relation_threshold: ", self.relation_threshold)
         self.device = device
 
     def forward(self, batch_hoi_results, targets):
@@ -1192,7 +1194,7 @@ class PostProcessHOI(nn.Module):
                     subject_boxes.append(subject_box)
                     object_boxes.append(object_box)
                     
-                    verb_scores.append(torch.tensor(hoi['relation_score'], device=self.device))
+                    verb_scores.append(torch.sigmoid(torch.tensor(hoi['relation_score'], device=self.device)))
                     sub_ids.append(idx)
                     obj_ids.append(idx)
                     idx += 1  # 更新下一个主体和客体的索引
@@ -1282,7 +1284,7 @@ class CriterionHOI(nn.Module):
                 matched_pred_verb_scores.append(pred[sub_idx]['relation_score'])
                 matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx])
                 pred_subject = pred[sub_idx]
-                pred_object = pred[obj_idx]
+
                 tgt_subject = tgt['sub_labels'][obj_idx]
                 tgt_object = tgt['obj_labels'][obj_idx]
                 H, W = tgt['size']
@@ -1293,21 +1295,29 @@ class CriterionHOI(nn.Module):
                     assert pred_subject['subject_category'] - 1 == tgt_subject.item(), f"Subject labels do not match: pred {pred_subject['subject_category']-1}, tgt {tgt_subject.item()}"
                 except AssertionError as e:
                     print(f"AssertionError: {e}")
+                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                    print(tgt['filename'])
                     self.subject_label_mismatch += 1
                 try:
-                    assert pred_object['object_category'] - 1 == tgt_object.item(), f"Object labels do not match: pred {pred_object['object_category']}, tgt {tgt_object.item()}"
+                    assert pred_subject['object_category'] - 1 == tgt_object.item(), f"Object labels do not match: pred {pred_subject['object_category']}, tgt {tgt_object.item()}"
                 except AssertionError as e:
                     print(f"AssertionError: {e}")
+                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                    print(tgt['filename'])
                     self.object_label_mismatch += 1
                 try:
                     assert torch.allclose(torch.tensor(pred_subject['subject_bbox'], device=self.device), tgt_sub_boxes), f"Subject boxes do not match: pred {pred_subject['subject_bbox']}, tgt {tgt_sub_boxes}"
                 except AssertionError as e:
                     print(f"AssertionError: {e}")
+                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                    print(tgt['filename'])
                     self.subject_box_mismatch += 1
                 try:
-                    assert torch.allclose(torch.tensor(pred_object['object_bbox'], device=self.device), tgt_obj_boxes), f"Object boxes do not match: pred {pred_object['object_bbox']}, tgt {tgt_obj_boxes}"
+                    assert torch.allclose(torch.tensor(pred_subject['object_bbox'], device=self.device), tgt_obj_boxes), f"Object boxes do not match: pred {pred_subject['object_bbox']}, tgt {tgt_obj_boxes}"
                 except AssertionError as e:
                     print(f"AssertionError: {e}")
+                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                    print(tgt['filename'])
                     self.object_box_mismatch += 1
             if matched_pred_verb_scores:
                 # matched_pred_verb_scores = torch.stack(matched_pred_verb_scores)

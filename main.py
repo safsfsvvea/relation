@@ -405,7 +405,7 @@ def get_args_parser():
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
-    parser.add_argument('--set_cost_obj_class', default=5, type=float,
+    parser.add_argument('--set_cost_obj_class', default=1, type=float,
                         help="Object class coefficient in the matching cost")
     parser.add_argument('--set_cost_verb_class', default=1, type=float,
                         help="Verb class coefficient in the matching cost")
@@ -590,6 +590,8 @@ def main(args):
             subset_indices = [args.index]
         else:
             subset_indices = list(range(min(args.subset_size, len(dataset_train))))
+            # subset_indices = list(range(2 *args.subset_size, min(3 * args.subset_size, len(dataset_train))))
+
         dataset_train = CustomSubset(dataset_train, subset_indices)
         dataset_val = CustomSubset(dataset_val, subset_indices)
         

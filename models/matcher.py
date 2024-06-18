@@ -28,12 +28,16 @@ class HungarianMatcherHOI_det(nn.Module):
         self.cost_verb_class = cost_verb_class
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
-
+        print("self.cost_obj_class: ", self.cost_obj_class)
+        print("self.cost_verb_class: ", self.cost_verb_class)
+        print("self.cost_bbox: ", self.cost_bbox)
+        print("self.cost_giou: ", self.cost_giou)
     @torch.no_grad()
     def forward(self, outputs, targets):
         batch_size = len(outputs)
         all_indices = []
-
+        # print("outputs: ", outputs)
+        # print("targets: ", targets)
         for idx in range(batch_size):
             pred = outputs[idx]
             tgt = targets[idx]
@@ -47,12 +51,24 @@ class HungarianMatcherHOI_det(nn.Module):
             pred_obj_scores = torch.tensor([p['object_score'] for p in pred], device=self.device)
             pred_obj_labels = torch.tensor([p['object_category'] for p in pred], device=self.device)
             pred_verb_scores = torch.stack([torch.tensor(p['relation_score'], device=self.device) for p in pred])
+            # print("----------------------")
+            # print("pred_sub_boxes: ", pred_sub_boxes)
+            # print("pred_obj_boxes: ", pred_obj_boxes)
+            # print("pred_obj_labels: ", pred_obj_labels)
+            
             # pred_verb_scores = torch.stack([torch.tensor(p['relation_score'], device=self.device).clone().detach() for p in pred])
             # print("tgt: ", tgt)
             tgt_sub_boxes = tgt['sub_boxes'].to(self.device)
             tgt_obj_boxes = tgt['obj_boxes'].to(self.device)
             tgt_obj_labels = tgt['obj_labels'].to(self.device)
             tgt_verb_labels = tgt['verb_labels'].to(self.device)
+            H, W = tgt['size']
+            tgt_sub_boxes = box_cxcywh_to_xyxy(tgt_sub_boxes) * torch.tensor([W, H, W, H], device=self.device)
+            tgt_obj_boxes = box_cxcywh_to_xyxy(tgt_obj_boxes) * torch.tensor([W, H, W, H], device=self.device)
+            # print("tgt_sub_boxes: ", tgt_sub_boxes)
+            # print("tgt_obj_boxes: ", tgt_obj_boxes)
+            # print("tgt_obj_labels: ", tgt_obj_labels)
+            # print("----------------------")
             # print("tgt_obj_labels:", tgt_obj_labels)
             # print("pred_obj_scores:", pred_obj_scores)
             num_classes = 80  # Including no object class
@@ -67,17 +83,6 @@ class HungarianMatcherHOI_det(nn.Module):
             pred_obj_logits = torch.log(pred_obj_probs / (1 - pred_obj_probs)).to(self.device)
             # print("pred_obj_logits: ", pred_obj_logits)
             # print("pred_obj_logits shape: ", pred_obj_logits.shape)
-            # 将pred_sub_boxes和pred_obj_boxes分别除以相应的tgt["size"]
-            H, W = tgt['size']
-            pred_sub_boxes[:, 0] /= W
-            pred_sub_boxes[:, 1] /= H
-            pred_sub_boxes[:, 2] /= W
-            pred_sub_boxes[:, 3] /= H
-            pred_obj_boxes[:, 0] /= W
-            pred_obj_boxes[:, 1] /= H
-            pred_obj_boxes[:, 2] /= W
-            pred_obj_boxes[:, 3] /= H
-
             # print("pred_obj_boxes: ", pred_obj_boxes)
 
             
@@ -99,18 +104,21 @@ class HungarianMatcherHOI_det(nn.Module):
                 cost_verb[i] = F.binary_cross_entropy_with_logits(expanded_scores, tgt_verb_labels, reduction='none').sum(1)
             # print("cost_verb shape: ", cost_verb.shape)
             cost_bbox = torch.cdist(pred_sub_boxes, tgt_sub_boxes, p=1).to(self.device) + torch.cdist(pred_obj_boxes, tgt_obj_boxes, p=1).to(self.device)
-            cost_giou = 1 - generalized_box_iou(pred_sub_boxes, box_cxcywh_to_xyxy(tgt_sub_boxes)).to(self.device) + \
-                        1 - generalized_box_iou(pred_obj_boxes, box_cxcywh_to_xyxy(tgt_obj_boxes)).to(self.device)
+            cost_giou = 1 - generalized_box_iou(pred_sub_boxes, tgt_sub_boxes).to(self.device) + \
+                        1 - generalized_box_iou(pred_obj_boxes, tgt_obj_boxes).to(self.device)
             # print("cost_bbox shape: ", cost_bbox.shape)
+            # print("cost_bbox: ", cost_bbox)
             # print("cost_giou shape: ", cost_giou.shape)
+            # print("cost_giou: ", cost_giou)
             # 整合成本
             C = self.cost_obj_class * cost_class + self.cost_verb_class * cost_verb + self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
             C = C.cpu()
             # print("C shape: ", C.shape)
+            # print("C: ", C)
             # 使用匈牙利算法进行匹配
             sub_ind, obj_ind = linear_sum_assignment(C.numpy())
             all_indices.append((sub_ind, obj_ind))
-
+        # print("all_indices: ", all_indices)
         return all_indices
 
 class HungarianMatcher(nn.Module):
