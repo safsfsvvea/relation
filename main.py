@@ -30,7 +30,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_detector', default=1e-5, type=float)
-    parser.add_argument('--lr_backbone', default=1e-5, type=float)
+    parser.add_argument('--lr_backbone', default=0, type=float) #1e-5
     parser.add_argument('--text_encoder_lr', default=5e-5, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--accumulation_steps', default=32, type=int)
@@ -62,7 +62,7 @@ def get_args_parser():
 
     #mlp
     parser.add_argument('--use_LN', action='store_true', help='use LayerNorm.')
-
+    parser.add_argument('--add_negative_category', action='store_true', help='add negative category.')
 
     # * Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
@@ -107,6 +107,8 @@ def get_args_parser():
 
     # HOI
     # Only one of --coco, --hoi and --cross_modal_pretrain can be True.
+    parser.add_argument('--iou_threshold', default=0.0, type=float,
+                        help="iou threshold to filter human object pairs.")
     parser.add_argument('--hoi', action='store_true',
                         help="Train for HOI if the flag is provided")
     parser.add_argument('--sgg', action='store_true',
@@ -523,15 +525,16 @@ def main(args):
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel(backbone, device=device, use_LN=args.use_LN)
+    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category)
     matcher = HungarianMatcherHOI_det(
         device=device,
         cost_obj_class=args.set_cost_obj_class,
         cost_verb_class=args.set_cost_verb_class,
         cost_bbox=args.set_cost_bbox,
-        cost_giou=args.set_cost_giou
+        cost_giou=args.set_cost_giou,
+        add_negative_category=args.add_negative_category
     )
-    criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
+    criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category)
     # optimizer = torch.optim.AdamW([
     # {'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr},
     # {'params': filter(lambda p: p.requires_grad, detector.parameters()), 'lr': args.lr_detector},
@@ -565,7 +568,16 @@ def main(args):
     if args.pretrained:
         print(f"Loading pretrained model from {args.pretrained}")
         checkpoint = torch.load(args.pretrained, map_location='cpu')
-        model.load_state_dict(checkpoint['state_dict'])
+        if train_backbone:
+            model.load_state_dict(checkpoint['state_dict'])
+            print("Loaded entire model state dict")
+        else:
+            relation_state_dict = checkpoint['state_dict']
+            model_state_dict = model.state_dict()
+            model_state_dict.update(relation_state_dict)  # 只更新模型中不包含 `backbone` 的参数
+            model.load_state_dict(model_state_dict)
+            print("Loaded relation state dict")
+
         # optimizer.load_state_dict(checkpoint['optimizer'])
         start_epoch = checkpoint['epoch']
         print(f"Loaded checkpoint from epoch {start_epoch}")
@@ -590,8 +602,8 @@ def main(args):
             subset_indices = [args.index]
         else:
             subset_indices = list(range(min(args.subset_size, len(dataset_train))))
-            # subset_indices = list(range(2 *args.subset_size, min(3 * args.subset_size, len(dataset_train))))
-
+            # subset_indices = list(range(args.subset_size, min(2 * args.subset_size, len(dataset_train))))
+        print("subset_indices: ", subset_indices)
         dataset_train = CustomSubset(dataset_train, subset_indices)
         dataset_val = CustomSubset(dataset_val, subset_indices)
         
@@ -698,13 +710,14 @@ def main(args):
         train_loss = 0
         for epoch in range(num_epochs):
             train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=None, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
-            if args.output_dir and epoch % 5 == 0:
+            state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
+            if args.output_dir and epoch % 10 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                 checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
                 checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
                 save_checkpoint({
                     'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
+                    'state_dict': state_dict_to_save,
                     'optimizer': optimizer.state_dict(),
                     'loss': train_loss,
                 }, filename=checkpoint_filename)
@@ -718,7 +731,7 @@ def main(args):
                 best_model_filename = os.path.join(args.output_dir, "best_model.pth.tar")
                 save_checkpoint({
                     'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
+                    'state_dict': state_dict_to_save,
                     'optimizer': optimizer.state_dict(),
                     'loss': train_loss,
                 }, filename=best_model_filename)
@@ -733,7 +746,7 @@ def main(args):
                     best_map_model_filename = os.path.join(args.output_dir, "best_map_model.pth.tar")
                     save_checkpoint({
                         'epoch': epoch + 1,
-                        'state_dict': model.state_dict(),
+                        'state_dict': state_dict_to_save,
                         'optimizer': optimizer.state_dict(),
                         'loss': train_loss,
                         'mAP': test_stats['mAP'],
@@ -743,7 +756,7 @@ def main(args):
             checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
             save_checkpoint({
                 'epoch': num_epochs,
-                'state_dict': model.state_dict(),
+                'state_dict': state_dict_to_save,
                 'optimizer': optimizer.state_dict(),
                 'loss': train_loss,
             }, filename=checkpoint_filename)

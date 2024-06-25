@@ -21,13 +21,14 @@ from torch.nn.utils.rnn import pad_packed_sequence, pad_sequence
 import torch.nn.functional as F
 
 class HungarianMatcherHOI_det(nn.Module):
-    def __init__(self, device, cost_obj_class=1.0, cost_verb_class=1.0, cost_bbox=1.0, cost_giou=1.0):
+    def __init__(self, device, cost_obj_class=1.0, cost_verb_class=1.0, cost_bbox=1.0, cost_giou=1.0, add_negative_category=False):
         super().__init__()
         self.device = device
         self.cost_obj_class = cost_obj_class
         self.cost_verb_class = cost_verb_class
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
+        self.add_negative_category= add_negative_category
         print("self.cost_obj_class: ", self.cost_obj_class)
         print("self.cost_verb_class: ", self.cost_verb_class)
         print("self.cost_bbox: ", self.cost_bbox)
@@ -50,7 +51,7 @@ class HungarianMatcherHOI_det(nn.Module):
             pred_obj_boxes = torch.tensor([p['object_bbox'] for p in pred], device=self.device)
             pred_obj_scores = torch.tensor([p['object_score'] for p in pred], device=self.device)
             pred_obj_labels = torch.tensor([p['object_category'] for p in pred], device=self.device)
-            pred_verb_scores = torch.stack([torch.tensor(p['relation_score'], device=self.device) for p in pred])
+            pred_verb_scores = torch.stack([p['relation_score'].to(self.device) for p in pred])
             # print("----------------------")
             # print("pred_sub_boxes: ", pred_sub_boxes)
             # print("pred_obj_boxes: ", pred_obj_boxes)
@@ -61,7 +62,12 @@ class HungarianMatcherHOI_det(nn.Module):
             tgt_sub_boxes = tgt['sub_boxes'].to(self.device)
             tgt_obj_boxes = tgt['obj_boxes'].to(self.device)
             tgt_obj_labels = tgt['obj_labels'].to(self.device)
-            tgt_verb_labels = tgt['verb_labels'].to(self.device)
+            # print("tgt['verb_labels']: ", tgt['verb_labels'])
+            if self.add_negative_category:
+                tgt_verb_labels = torch.cat([tgt['verb_labels'], torch.zeros(tgt['verb_labels'].size(0), 1, device=self.device)], dim=1).to(self.device)
+            else:
+                tgt_verb_labels = tgt['verb_labels'].to(self.device)
+            
             H, W = tgt['size']
             tgt_sub_boxes = box_cxcywh_to_xyxy(tgt_sub_boxes) * torch.tensor([W, H, W, H], device=self.device)
             tgt_obj_boxes = box_cxcywh_to_xyxy(tgt_obj_boxes) * torch.tensor([W, H, W, H], device=self.device)

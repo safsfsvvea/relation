@@ -371,7 +371,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
         samples = samples.to(device)
 
         outputs = model(samples, targets, detections)
-        # print("outputs: ", outputs)
+        print("outputs: ", outputs)
         # loss = criterion(outputs, targets)
         # print("loss: ", loss)
         results = postprocessors(outputs, targets)
@@ -422,55 +422,55 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     #     print(f"gts[{i}]: ", gts[i]) 
     # print("len(preds): ", len(preds))
     # print("len(gts): ", len(gts))
-    # if preds[0]:
-    #     import torch.nn.functional as F
+    if preds[0]:
+        import torch.nn.functional as F
 
-    #     # # 假设 preds[0]['verb_scores'] 是 PyTorch 张量
-    #     logits = preds[0]['verb_scores']
-    #     # verb_labels = torch.zeros((1,117), device='cuda:0')
-    #     # verb_labels[0][gts[0]['hois'][:, 2]] = 1
+        # # 假设 preds[0]['verb_scores'] 是 PyTorch 张量
+        logits = preds[0]['verb_scores']
+        # verb_labels = torch.zeros((1,117), device='cuda:0')
+        # verb_labels[0][gts[0]['hois'][:, 2]] = 1
 
-    #     # print("One-hot encoded verb_labels:", verb_labels)
-    #     # print("verb_labels shape: ", verb_labels.shape)
-    #     # print("logits shape: ", logits.shape)
-    #     # try:
-    #     #     focal_loss = criterion.focal_loss(logits, verb_labels)
-    #     # except Exception as e:
-    #     #     focal_loss = None
-    #     #     print(f"Error calculating focal loss: {e}")
+        # print("One-hot encoded verb_labels:", verb_labels)
+        # print("verb_labels shape: ", verb_labels.shape)
+        # print("logits shape: ", logits.shape)
+        # try:
+        #     focal_loss = criterion.focal_loss(logits, verb_labels)
+        # except Exception as e:
+        #     focal_loss = None
+        #     print(f"Error calculating focal loss: {e}")
 
-    #     # try:
-    #     #     bce_loss = criterion.bce_loss(logits, verb_labels)
-    #     # except Exception as e:
-    #     #     bce_loss = None
-    #     #     print(f"Error calculating bce loss: {e}")
+        # try:
+        #     bce_loss = criterion.bce_loss(logits, verb_labels)
+        # except Exception as e:
+        #     bce_loss = None
+        #     print(f"Error calculating bce loss: {e}")
 
-    #     # if focal_loss is not None:
-    #     #     print("focal loss: ", focal_loss)
+        # if focal_loss is not None:
+        #     print("focal loss: ", focal_loss)
 
-    #     # if bce_loss is not None:
-    #     #     print("bce loss: ", bce_loss)
-    #     # 转换 logits 为概率
-    #     # probabilities = F.softmax(logits, dim=1)
+        # if bce_loss is not None:
+        #     print("bce loss: ", bce_loss)
+        # 转换 logits 为概率
+        # probabilities = F.softmax(logits, dim=1)
 
-    #     sorted_probabilities, sorted_indices = torch.sort(logits, dim=1, descending=True)
-    #     num_hois = len(gts[0]['hois'])
-    #     top_probabilities = sorted_probabilities[:, :num_hois]
-    #     top_labels = sorted_indices[:, :num_hois]
-    #     # 获取每个样本的预测标签索引
-    #     # max_probabilities, predicted_labels = torch.max(probabilities, dim=1)
+        sorted_probabilities, sorted_indices = torch.sort(logits, dim=1, descending=True)
+        num_hois = len(gts[0]['hois'])
+        top_probabilities = sorted_probabilities[:, :num_hois]
+        top_labels = sorted_indices[:, :num_hois]
+        # 获取每个样本的预测标签索引
+        # max_probabilities, predicted_labels = torch.max(probabilities, dim=1)
 
-    #     print("-----------------")
-    #     print("preds[0]: ", preds[0])
-    #     print("预测的概率: ", logits)
-    #     print("每个样本最高的概率值: ", top_probabilities)
-    #     print("预测的标签索引: ", top_labels)
-    #     print("preds[0]['labels']: ", preds[0]['labels'].shape)
-    #     print("preds[0]['boxes']: ", preds[0]['boxes'].shape)
-    #     print("preds[0]['verb_scores']: ", preds[0]['verb_scores'].shape)
-    #     print("preds[0]['sub_ids']: ", preds[0]['sub_ids'].shape)
-    #     print("preds[0]['obj_ids']: ", preds[0]['obj_ids'].shape)
-    #     print("-----------------")
+        print("-----------------")
+        print("preds[0]: ", preds[0])
+        print("预测的概率: ", logits)
+        print("每个样本最高的概率值: ", top_probabilities)
+        print("预测的标签索引: ", top_labels)
+        print("preds[0]['labels']: ", preds[0]['labels'].shape)
+        print("preds[0]['boxes']: ", preds[0]['boxes'].shape)
+        print("preds[0]['verb_scores']: ", preds[0]['verb_scores'].shape)
+        print("preds[0]['sub_ids']: ", preds[0]['sub_ids'].shape)
+        print("preds[0]['obj_ids']: ", preds[0]['obj_ids'].shape)
+        print("-----------------")
     # if preds[1]:
     #     print("-----------------")
     #     print("preds[1]: ", preds[1])
@@ -481,7 +481,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     #     print("preds[1]['obj_ids']: ", preds[1]['obj_ids'].shape)
     #     print("-----------------")
     # print("len(gts): ", len(gts))
-    # print("gts[0]: ", gts[0]) 
+    print("gts[0]: ", gts[0]) 
     return stats
 
 def evaluate_det_hico(model, data_loader, device, args):

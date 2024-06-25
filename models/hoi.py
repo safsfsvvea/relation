@@ -9,9 +9,10 @@ from torchvision.ops import roi_align, sigmoid_focal_loss
 import concurrent.futures
 import torch.profiler
 from util.box_ops import box_cxcywh_to_xyxy
+from torchvision.ops import box_iou
 
 class HOIModel(nn.Module):
-    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False):
         super(HOIModel, self).__init__()
         self.backbone = backbone
         self.device = device
@@ -21,6 +22,9 @@ class HOIModel(nn.Module):
         self.patch_size = patch_size
         self.no_pairs_count = 0  # 用于统计 "No pairs found for this batch." 的计数
         self.no_results_count = 0  # 用于统计 "No results found for this image." 的计数
+        self.iou_threshold = iou_threshold
+        self.num_category = 117 if not add_negative_category else 118
+
         if not use_LN:
         #     self.mlp = nn.Sequential(
         #     nn.Linear(2 * feature_dim, 512),
@@ -32,45 +36,45 @@ class HOIModel(nn.Module):
             self.mlp = nn.Sequential(
                 nn.Linear(2 * feature_dim, 1024),
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                # nn.Dropout(p=0.5),  
                 nn.Linear(1024, 512),
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                # nn.Dropout(p=0.5),  
                 nn.Linear(512, 256),
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                # nn.Dropout(p=0.5),  
                 nn.Linear(256, 128),
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                # nn.Dropout(p=0.5),  
                 nn.Linear(128, 64),
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  # 添加 Dropout 层
-                nn.Linear(64, 117)  # Assuming 117 relation classes
+                # nn.Dropout(p=0.5), 
+                nn.Linear(64, self.num_category)  
             )
         else:
             print("use deep mlp")
             self.mlp = nn.Sequential(
                 nn.Linear(2 * feature_dim, 1024),
-                nn.LayerNorm(1024),  # 添加 LayerNorm 层
+                nn.LayerNorm(1024),  
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                # nn.Dropout(p=0.5),  
                 nn.Linear(1024, 512),
-                nn.LayerNorm(512),  # 添加 LayerNorm 层
+                nn.LayerNorm(512),  
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                # nn.Dropout(p=0.5),  
                 nn.Linear(512, 256),
-                nn.LayerNorm(256),  # 添加 LayerNorm 层
+                nn.LayerNorm(256),  
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                # nn.Dropout(p=0.5),  
                 nn.Linear(256, 128),
-                nn.LayerNorm(128),  # 添加 LayerNorm 层
+                nn.LayerNorm(128),  
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  # 添加 Dropout 层
+                # nn.Dropout(p=0.5),  
                 nn.Linear(128, 64),
-                nn.LayerNorm(64),  # 添加 LayerNorm 层
+                nn.LayerNorm(64),  
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  # 添加 Dropout 层
-                nn.Linear(64, 117)  # 假设有 117 个类别
+                # nn.Dropout(p=0.5),  
+                nn.Linear(64, self.num_category)  
             )
 
         self.to(self.device)
@@ -93,10 +97,10 @@ class HOIModel(nn.Module):
         
         def process_image(image_index, detections, target):
             H, W = target['size'].cpu()
-            if not detections['boxes'].nelement():  # 检查是否为空
+            if not detections['boxes'].nelement(): 
                 return None
 
-            # 将中心坐标和宽高转换为边界框坐标
+
             boxes = detections['boxes'].cpu()
             labels = detections['labels'].cpu()
             scores = detections['scores'].cpu()
@@ -112,7 +116,6 @@ class HOIModel(nn.Module):
             scaled_xmax = xmax / scale_factor
             scaled_ymax = ymax / scale_factor
             
-            # 收集转换后的边界框和对应的批次索引
             rois = torch.stack([torch.full_like(scaled_ymin, image_index), scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
 
             return rois, labels, scores, torch.full((boxes.size(0),), image_index, dtype=torch.int64)
@@ -138,7 +141,6 @@ class HOIModel(nn.Module):
         scores_tensor = torch.cat(all_scores)
         image_indices_tensor = torch.cat(image_indices)
 
-        # 记录每张图片的检测框数量
         detection_counts = [len(detections['boxes']) for detections in detections_batch]
 
         additional_info = [{'label': label.item(), 'bbox': [roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor, roi[4].item() * scale_factor], 'image_index': idx.item(), 'score': score.item()}
@@ -159,14 +161,13 @@ class HOIModel(nn.Module):
         all_scores = []
         image_indices = []
 
-        scale_factor = self.patch_size / 2  # 根据您的指示计算缩放因子
+        scale_factor = self.patch_size / 2  
 
         for image_index, (detections, target) in enumerate(zip(detections_batch, targets)):
             H, W = target['size']
-            if detections['boxes'].numel() == 0:  # 检查是否为空
+            if detections['boxes'].numel() == 0:  
                 continue
 
-            # 将中心坐标和宽高转换为边界框坐标
             boxes = detections['boxes'].to(self.device)
             labels = detections['labels'].to(self.device)
             scores = detections['scores'].to(self.device)
@@ -177,14 +178,12 @@ class HOIModel(nn.Module):
             xmax = (cx + bw / 2) * W
             ymax = (cy + bh / 2) * H
 
-            # 根据您的建议进行缩放
             scaled_xmin = xmin / scale_factor
             scaled_ymin = ymin / scale_factor
             scaled_xmax = xmax / scale_factor
             scaled_ymax = ymax / scale_factor
 
-            # 收集转换后的边界框和对应的批次索引
-            rois = torch.stack([torch.full_like(scaled_ymin, image_index), scaled_ymin, scaled_xmin, scaled_ymax, scaled_xmax], dim=1)
+            rois = torch.stack([torch.full_like(scaled_ymin, image_index), scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
 
             all_boxes.append(rois)
             all_labels.append(labels)
@@ -199,10 +198,9 @@ class HOIModel(nn.Module):
         scores_tensor = torch.cat(all_scores)
         image_indices_tensor = torch.cat(image_indices)
 
-        # 记录每张图片的检测框数量
         detection_counts = [len(detections['boxes']) for detections in detections_batch]
 
-        additional_info = [{'label': label.item(), 'bbox': [roi[2].item() * scale_factor, roi[1].item() * scale_factor, roi[4].item() * scale_factor, roi[3].item() * scale_factor], 'image_index': idx.item(), 'score': score.item()}
+        additional_info = [{'label': label.item(), 'bbox': [roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor, roi[4].item() * scale_factor], 'image_index': idx.item(), 'score': score.item()}
                         for label, roi, idx, score in zip(labels_tensor, rois_tensor, image_indices_tensor, scores_tensor)]
 
         return rois_tensor.float(), additional_info, detection_counts
@@ -267,20 +265,68 @@ class HOIModel(nn.Module):
             # 生成所有有效的 human-object pairs
             # print("len(human_features): ", len(human_features))
             # print("len(object_features): ", len(object_features))
-            for human in human_features:
-                for obj in object_features:
-                    combined_feature = torch.cat([human[0], obj[0]], dim=0)
-                    all_pairs.append(combined_feature.unsqueeze(0))
-                    hoi_results.append({
-                        'subject_category': human[2],
-                        'subject_score': human[1],
-                        'subject_bbox': human[3],
-                        'object_category': obj[2],
-                        'object_score': obj[1],
-                        'object_bbox': obj[3],
-                    })
-                    current_index += 1
-        
+            
+            # for human1 in human_features:
+            #     for human2 in human_features:
+            #         human_feature = human1[0]
+            #         obj_feature = human2[0]
+            #         cosine_similarity = F.cosine_similarity(human_feature.unsqueeze(0), obj_feature.unsqueeze(0))
+            #         print("human human Cosine Similarity:", cosine_similarity.item())
+            # for object1 in object_features:
+            #     for object2 in object_features:
+            #         human_feature = object1[0]
+            #         obj_feature = object2[0]
+            #         cosine_similarity = F.cosine_similarity(human_feature.unsqueeze(0), obj_feature.unsqueeze(0))
+            #         print("object object Cosine Similarity:", cosine_similarity.item())
+            
+            human_boxes = torch.tensor([human[3] for human in human_features], dtype=torch.float32)
+            object_boxes = torch.tensor([obj[3] for obj in object_features], dtype=torch.float32)
+
+            # 计算 IoU 矩阵
+            iou_matrix = box_iou(human_boxes, object_boxes)
+            print("iou_matrix: ", iou_matrix)
+            pairs = torch.nonzero(iou_matrix >= self.iou_threshold, as_tuple=False)
+
+            # 遍历筛选后的配对
+            for pair in pairs:
+                human_idx, obj_idx = pair
+                human = human_features[human_idx]
+                obj = object_features[obj_idx]
+                
+                combined_feature = torch.cat([human[0], obj[0]], dim=0)
+                # human_feature = human[0]
+                # obj_feature = obj[0]
+                # cosine_similarity = F.cosine_similarity(human_feature.unsqueeze(0), obj_feature.unsqueeze(0))
+                # print("human object Cosine Similarity:", cosine_similarity.item())
+                all_pairs.append(combined_feature.unsqueeze(0))
+                hoi_results.append({
+                    'subject_category': human[2],
+                    'subject_score': human[1],
+                    'subject_bbox': human[3],
+                    'object_category': obj[2],
+                    'object_score': obj[1],
+                    'object_bbox': obj[3],
+                })
+                current_index += 1                
+            # for human in human_features:
+            #     for obj in object_features:
+            #         if box_iou(human[3], obj[3]) > 0.5:
+            #             combined_feature = torch.cat([human[0], obj[0]], dim=0)
+            #             human_feature = human[0]
+            #             obj_feature = obj[0]
+            #             cosine_similarity = F.cosine_similarity(human_feature.unsqueeze(0), obj_feature.unsqueeze(0))
+            #             print("human object Cosine Similarity:", cosine_similarity.item())
+            #             all_pairs.append(combined_feature.unsqueeze(0))
+            #             hoi_results.append({
+            #                 'subject_category': human[2],
+            #                 'subject_score': human[1],
+            #                 'subject_bbox': human[3],
+            #                 'object_category': obj[2],
+            #                 'object_score': obj[1],
+            #                 'object_bbox': obj[3],
+            #             })
+            #             current_index += 1
+        print("len(all_pairs): ", len(all_pairs))
         if all_pairs:
             all_pairs_tensor = torch.cat(all_pairs, dim=0)
             relation_scores = self.mlp(all_pairs_tensor)
@@ -1171,17 +1217,15 @@ class PostProcessHOI(nn.Module):
             object_labels = []
             obj_ids = []
             idx = 0
-            orig_size = torch.tensor(targets[b]['orig_size'], device=self.device)
-            current_size = torch.tensor(targets[b]['size'], device=self.device)
+            orig_size = targets[b]['orig_size'].to(self.device)
+            current_size = targets[b]['size'].to(self.device)
             scale_w = orig_size[1].float() / current_size[1].float()  # 宽度比例
             scale_h = orig_size[0].float() / current_size[0].float()  # 高度比例
             # 对每个图像的HOI结果进行处理
             for hoi in image_results:
-                # 应用softmax并检查最大值是否达到阈值
-                relation_probs = F.softmax(torch.tensor(hoi['relation_score'], device=self.device), dim=0)
-                max_prob, max_idx = torch.max(relation_probs, dim=0)
+                relation_probs = torch.sigmoid(hoi['relation_score'].to(self.device))
 
-                if max_prob.item() >= self.relation_threshold:
+                if torch.any(relation_probs >= self.relation_threshold):
                     # 更新列表和字典
                     
                     subject_labels.append(hoi['subject_category']-1)
@@ -1194,7 +1238,7 @@ class PostProcessHOI(nn.Module):
                     subject_boxes.append(subject_box)
                     object_boxes.append(object_box)
                     
-                    verb_scores.append(torch.sigmoid(torch.tensor(hoi['relation_score'], device=self.device)))
+                    verb_scores.append(relation_probs)
                     sub_ids.append(idx)
                     obj_ids.append(idx)
                     idx += 1  # 更新下一个主体和客体的索引
@@ -1233,7 +1277,7 @@ class PostProcessHOI(nn.Module):
         return processed_results
 
 class CriterionHOI(nn.Module):
-    def __init__(self, matcher, device, alpha=0.25, gamma=2.0, loss_type='focal'):
+    def __init__(self, matcher, device, alpha=0.25, gamma=2.0, loss_type='focal', add_negative_category=False):
         super().__init__()
         self.matcher = matcher
         self.device = device
@@ -1246,6 +1290,8 @@ class CriterionHOI(nn.Module):
         self.subject_box_mismatch = 0
         self.object_box_mismatch = 0
         self.total_pairs = 0
+        self.add_negative_category = add_negative_category
+        self.num_category = 117 if not add_negative_category else 118
         
     def forward(self, outputs, targets):
         """
@@ -1265,6 +1311,8 @@ class CriterionHOI(nn.Module):
         # print("len(outputs)", len(outputs))
         # print("len(targets)", len(targets))
         
+        matched_pred_verb_scores = []
+        matched_tgt_verb_labels = []
         for idx, (pred, tgt) in enumerate(zip(outputs, targets)):
             if len(pred) == 0:
                 # 如果当前图像没有预测结果，跳过此图像的损失计算
@@ -1275,14 +1323,16 @@ class CriterionHOI(nn.Module):
             if len(sub_inds) == 0 or len(obj_inds) == 0:
                 # 如果没有有效匹配，也跳过此图像
                 continue
-            
-            matched_pred_verb_scores = []
-            matched_tgt_verb_labels = []
 
             for sub_idx, obj_idx in zip(sub_inds, obj_inds):
                 # 收集所有匹配对的预测logits和目标labels
+                # print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
                 matched_pred_verb_scores.append(pred[sub_idx]['relation_score'])
-                matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx])
+                
+                if self.add_negative_category:
+                    matched_tgt_verb_labels.append(torch.cat([tgt['verb_labels'][obj_idx], torch.tensor([0.0], device=self.device)], dim=0).unsqueeze(0))
+                else:
+                    matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx].unsqueeze(0))
                 pred_subject = pred[sub_idx]
 
                 tgt_subject = tgt['sub_labels'][obj_idx]
@@ -1319,29 +1369,44 @@ class CriterionHOI(nn.Module):
                     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
                     print(tgt['filename'])
                     self.object_box_mismatch += 1
-            if matched_pred_verb_scores:
-                # matched_pred_verb_scores = torch.stack(matched_pred_verb_scores)
-                # matched_tgt_verb_labels = torch.stack(matched_tgt_verb_labels)
-                matched_pred_verb_scores = torch.stack([tensor for tensor in matched_pred_verb_scores]).requires_grad_(True)
-                matched_tgt_verb_labels = torch.stack([torch.tensor(arr, device=self.device) for arr in matched_tgt_verb_labels]) #.requires_grad_(True)
+            if self.add_negative_category:
+                unmatched_pred_verb_scores = []
+                for i in range(len(pred)):
+                    if i not in sub_inds:
+                        unmatched_pred_verb_scores.append(pred[i]['relation_score'])
+
+                if unmatched_pred_verb_scores:
+                    matched_pred_verb_scores += unmatched_pred_verb_scores
+                    negative_labels = torch.zeros((len(unmatched_pred_verb_scores), self.num_category), device=self.device)
+                    negative_labels[:, -1] = 1  # 将标签设置为第118类
+                    matched_tgt_verb_labels += [negative_labels]
+
+        if matched_pred_verb_scores:
+            # matched_pred_verb_scores = torch.stack(matched_pred_verb_scores)
+            # matched_tgt_verb_labels = torch.stack(matched_tgt_verb_labels)
+            matched_pred_verb_scores = torch.stack([tensor for tensor in matched_pred_verb_scores]).requires_grad_(True)
+            matched_tgt_verb_labels = torch.cat(matched_tgt_verb_labels, dim=0) #.requires_grad_(True)
+            # print("matched_tgt_verb_labels: ", matched_tgt_verb_labels)
+            # 确保tensor中的元素只包含0或1
+            # assert torch.all((matched_tgt_verb_labels == 0) | (matched_tgt_verb_labels == 1)), "Tensor should only contain 0s and 1s."
+            
+            # 确保每个样本的编码中只有一个1
+            # assert torch.all(torch.sum(matched_tgt_verb_labels, dim=-1) == 1), "Each sample should have exactly one category set to 1."
+            if self.loss_type == 'focal':
+                # 计算Focal Loss
+                # print("matched_pred_verb_scores: ", matched_pred_verb_scores)
                 # print("matched_tgt_verb_labels: ", matched_tgt_verb_labels)
-                # 确保tensor中的元素只包含0或1
-                # assert torch.all((matched_tgt_verb_labels == 0) | (matched_tgt_verb_labels == 1)), "Tensor should only contain 0s and 1s."
-                
-                # 确保每个样本的编码中只有一个1
-                # assert torch.all(torch.sum(matched_tgt_verb_labels, dim=-1) == 1), "Each sample should have exactly one category set to 1."
-                if self.loss_type == 'focal':
-                    # 计算Focal Loss
-                    loss = self.focal_loss(matched_pred_verb_scores, matched_tgt_verb_labels)
-                elif self.loss_type == 'bce':
-                    # 计算二元交叉熵损失
-                    loss = self.bce_loss(matched_pred_verb_scores, matched_tgt_verb_labels)
-                    # print("bce_loss: ", loss)
-                batch_loss += loss
-                num_processed += 1
-        if batch_loss == 0.0:
-            batch_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-        return batch_loss / max(num_processed, 1)  # 避免除以零
+                batch_loss = self.focal_loss(matched_pred_verb_scores, matched_tgt_verb_labels)
+                print("batch_loss: ", batch_loss)
+            elif self.loss_type == 'bce':
+                # 计算二元交叉熵损失
+                batch_loss = self.bce_loss(matched_pred_verb_scores, matched_tgt_verb_labels)
+                # print("bce_loss: ", loss)
+            # batch_loss += loss
+            # num_processed += 1
+        # if batch_loss == 0.0:
+        #     batch_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        return batch_loss
 
     def focal_loss(self, inputs, targets):
         """ 计算Focal Loss，用于处理类别不平衡问题 """

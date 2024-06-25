@@ -41,7 +41,7 @@ class HICOEvaluator():
             if img_preds:
                 img_preds = {k: v.to('cpu').numpy() for k, v in img_preds.items()}
                 bboxes = [{'bbox': bbox, 'category_id': label} for bbox, label in zip(img_preds['boxes'], img_preds['labels'])]
-                hoi_scores = img_preds['verb_scores'] # [100, 117]
+                hoi_scores = img_preds['verb_scores'][:, :117] # [100, 117]
                 # print("hoi_scores: ", hoi_scores)
                 # print("hoi_scores shape: ", hoi_scores.shape)
                 verb_labels = np.tile(np.arange(hoi_scores.shape[1]), (hoi_scores.shape[0], 1))
@@ -151,6 +151,8 @@ class HICOEvaluator():
             ### len(pred_hois) != 0 is used to defend against the situation in zero-shot eval.
             if len(gt_bboxes) != 0 and len(pred_hois) != 0:            
                 bbox_pairs, bbox_overlaps = self.compute_iou_mat(gt_bboxes, pred_bboxes)
+                # print("bbox_pairs: ", bbox_pairs)
+                # print("bbox_overlaps: ", bbox_overlaps)
                 # self.record_fp(pred_hois, gt_hois, bbox_pairs, pred_bboxes, bbox_overlaps)
                 self.compute_fptp(pred_hois, gt_hois, bbox_pairs, pred_bboxes, bbox_overlaps)
             else:
