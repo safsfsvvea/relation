@@ -610,10 +610,10 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         img_anno = self.annotations[self.ids[idx]]
         # print("img_anno: ", img_anno)
         # debug for trainset index 59
-        img_anno['hoi_annotation']=img_anno['hoi_annotation'][:2]
-        print("img_anno['hoi_annotation']: ", img_anno['hoi_annotation'])
-        img_anno['annotations']=img_anno['annotations'][:4]
-        print("img_anno['annotations']: ", img_anno['annotations'])
+        # img_anno['hoi_annotation']=img_anno['hoi_annotation'][:2]
+        # print("img_anno['hoi_annotation']: ", img_anno['hoi_annotation'])
+        # img_anno['annotations']=img_anno['annotations'][:4]
+        # print("img_anno['annotations']: ", img_anno['annotations'])
         
         
         target1 = {}
