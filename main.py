@@ -1,6 +1,6 @@
 from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
-from models.hoi import HOIModel, CriterionHOI, PostProcessHOI, HOIModel_old, HOIModel_profiler, HOIModel_time
+from models.hoi import HOIModel, CriterionHOI, PostProcessHOI
 from models.matcher import HungarianMatcherHOI_det
 from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time
 import datasets
@@ -25,12 +25,13 @@ from torch.utils.tensorboard import SummaryWriter
 import os
 from torch.utils.data import Subset
 from sklearn.model_selection import KFold
+import copy
 # from ultralytics import YOLO
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_detector', default=1e-5, type=float)
-    parser.add_argument('--lr_backbone', default=1e-5, type=float)
+    parser.add_argument('--lr_backbone', default=0, type=float) #1e-5
     parser.add_argument('--text_encoder_lr', default=5e-5, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--accumulation_steps', default=32, type=int)
@@ -62,7 +63,8 @@ def get_args_parser():
 
     #mlp
     parser.add_argument('--use_LN', action='store_true', help='use LayerNorm.')
-
+    parser.add_argument('--add_negative_category', action='store_true', help='add negative category.')
+    parser.add_argument('--positive_negative', action='store_true', help='add positive negative mlp.')
 
     # * Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
@@ -107,6 +109,10 @@ def get_args_parser():
 
     # HOI
     # Only one of --coco, --hoi and --cross_modal_pretrain can be True.
+    parser.add_argument('--topK', default=15, type=int,
+                        help="iou top K filter human object pairs.")
+    parser.add_argument('--iou_threshold', default=0.0, type=float,
+                        help="iou threshold to filter human object pairs.")
     parser.add_argument('--hoi', action='store_true',
                         help="Train for HOI if the flag is provided")
     parser.add_argument('--sgg', action='store_true',
@@ -405,7 +411,7 @@ def get_args_parser():
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
-    parser.add_argument('--set_cost_obj_class', default=5, type=float,
+    parser.add_argument('--set_cost_obj_class', default=1, type=float,
                         help="Object class coefficient in the matching cost")
     parser.add_argument('--set_cost_verb_class', default=1, type=float,
                         help="Verb class coefficient in the matching cost")
@@ -433,6 +439,7 @@ def get_args_parser():
     
 
     # dataset parameters
+    parser.add_argument('--notransform', action='store_true', help='not use transform in debug')
     parser.add_argument('--trainset_val', action='store_true', help='Use trainset validation')
     parser.add_argument('--index', default=None, type=int, help='index for test')
     parser.add_argument('--num_folds', default=5, type=int, help='Number of folds for cross validation')
@@ -522,15 +529,16 @@ def main(args):
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel(backbone, device=device, use_LN=args.use_LN)
+    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative)
     matcher = HungarianMatcherHOI_det(
         device=device,
         cost_obj_class=args.set_cost_obj_class,
         cost_verb_class=args.set_cost_verb_class,
         cost_bbox=args.set_cost_bbox,
-        cost_giou=args.set_cost_giou
+        cost_giou=args.set_cost_giou,
+        add_negative_category=args.add_negative_category
     )
-    criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
+    criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category, positive_negative=args.positive_negative)
     # optimizer = torch.optim.AdamW([
     # {'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr},
     # {'params': filter(lambda p: p.requires_grad, detector.parameters()), 'lr': args.lr_detector},
@@ -538,12 +546,15 @@ def main(args):
     if train_backbone == True: 
         print("Number of backbone parameters before optimizer:", sum(p.numel() for p in model.backbone.parameters()))
         print("Number of mlp parameters before optimizer:", sum(p.numel() for p in model.mlp.parameters()))
+        print("Number of positive_negative mlp parameters before optimizer:", sum(p.numel() for p in model.positive_negative.parameters()))
         optimizer = torch.optim.AdamW([
         {'params': model.backbone.parameters(), 'lr': args.lr_backbone},
-        {'params': model.mlp.parameters(), 'lr': args.lr}
+        {'params': model.mlp.parameters(), 'lr': args.lr},
+        {'params': model.positive_negative.parameters(), 'lr': args.lr},
         ], weight_decay=args.weight_decay)
         print("Number of parameter tensors in optimizer backbone:", len(list(optimizer.param_groups[0]['params'])))
         print("Number of parameter tensors in optimizer mlp:", len(list(optimizer.param_groups[1]['params'])))
+        print("Number of parameter tensors in optimizer positive_negative mlp:", len(list(optimizer.param_groups[2]['params'])))
         # 打印优化器中backbone参数的总数
         backbone_params_count = sum(p.numel() for p in optimizer.param_groups[0]['params'])
         print("Total number of parameters in optimizer backbone:", backbone_params_count)
@@ -551,6 +562,10 @@ def main(args):
         # 打印优化器中mlp参数的总数
         mlp_params_count = sum(p.numel() for p in optimizer.param_groups[1]['params'])
         print("Total number of parameters in optimizer mlp:", mlp_params_count)
+        
+        # 打印优化器中positive_negative mlp参数的总数
+        positive_negative_params_count = sum(p.numel() for p in optimizer.param_groups[2]['params'])
+        print("Total number of parameters in optimizer positive_negative mlp:", positive_negative_params_count)
     else:
         optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
                                     weight_decay=args.weight_decay)
@@ -560,11 +575,20 @@ def main(args):
         print("Total number of parameters in optimizer mlp:", mlp_params_count)
     lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, threshold=0.0001, min_lr=1e-6)
     
-    postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
+    postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, positive_negative=args.positive_negative, device=device)
     if args.pretrained:
         print(f"Loading pretrained model from {args.pretrained}")
         checkpoint = torch.load(args.pretrained, map_location='cpu')
-        model.load_state_dict(checkpoint['state_dict'])
+        if train_backbone:
+            model.load_state_dict(checkpoint['state_dict'])
+            print("Loaded entire model state dict")
+        else:
+            relation_state_dict = checkpoint['state_dict']
+            model_state_dict = model.state_dict()
+            model_state_dict.update(relation_state_dict)  # 只更新模型中不包含 `backbone` 的参数
+            model.load_state_dict(model_state_dict)
+            print("Loaded relation state dict")
+
         # optimizer.load_state_dict(checkpoint['optimizer'])
         start_epoch = checkpoint['epoch']
         print(f"Loaded checkpoint from epoch {start_epoch}")
@@ -589,6 +613,12 @@ def main(args):
             subset_indices = [args.index]
         else:
             subset_indices = list(range(min(args.subset_size, len(dataset_train))))
+            # subset_indices = [42, 49]
+            # subset_indices = [43, 49, 56, 57]
+            # excluded_indices = {43, 47, 49, 56, 57, 59}
+            # subset_indices = [i for i in range(2 * args.subset_size, min(3 * args.subset_size, len(dataset_train))) if i not in excluded_indices]
+            # subset_indices = list(range(2*args.subset_size, min(3 * args.subset_size, len(dataset_train))))
+        print("subset_indices: ", subset_indices)
         dataset_train = CustomSubset(dataset_train, subset_indices)
         dataset_val = CustomSubset(dataset_val, subset_indices)
         
@@ -694,14 +724,15 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
-            if args.output_dir and epoch % 2 == 0:
+            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=None, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
+            state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
+            if args.output_dir and epoch % 100 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                 checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
                 checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
                 save_checkpoint({
                     'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
+                    'state_dict': state_dict_to_save,
                     'optimizer': optimizer.state_dict(),
                     'loss': train_loss,
                 }, filename=checkpoint_filename)
@@ -715,14 +746,24 @@ def main(args):
                 best_model_filename = os.path.join(args.output_dir, "best_model.pth.tar")
                 save_checkpoint({
                     'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
+                    'state_dict': state_dict_to_save,
                     'optimizer': optimizer.state_dict(),
                     'loss': train_loss,
                 }, filename=best_model_filename)
                 
                 print(f"Best model saved to {best_model_filename} at epoch {epoch}")
             if epoch % 5 == 0 or epoch == num_epochs - 1:
+                # train_state_dict = copy.deepcopy(model.state_dict())
                 test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
+                # test_state_dict = copy.deepcopy(model.state_dict())
+                # assert torch.equal(train_input[0][0].tensors, test_input[0][0].tensors), "Train and test images are different"
+                # assert torch.equal(train_input[0][0].mask, test_input[0][0].mask), "Train and test masks are different"
+                # print("train target: ", train_input[0][1])
+                # print("test target: ", test_input[0][1])
+                # print("train detection: ", train_input[0][2])
+                # print("test detection: ", test_input[0][2])
+                # for key in train_state_dict:
+                #     assert torch.equal(train_state_dict[key], test_state_dict[key]), f"Train and test model parameters are different for key: {key}"
                 tensorboard_writer.add_scalar('Test/mAP', test_stats['mAP'], epoch)
                 
                 if test_stats['mAP'] > best_map:
@@ -730,7 +771,7 @@ def main(args):
                     best_map_model_filename = os.path.join(args.output_dir, "best_map_model.pth.tar")
                     save_checkpoint({
                         'epoch': epoch + 1,
-                        'state_dict': model.state_dict(),
+                        'state_dict': state_dict_to_save,
                         'optimizer': optimizer.state_dict(),
                         'loss': train_loss,
                         'mAP': test_stats['mAP'],
@@ -740,7 +781,7 @@ def main(args):
             checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
             save_checkpoint({
                 'epoch': num_epochs,
-                'state_dict': model.state_dict(),
+                'state_dict': state_dict_to_save,
                 'optimizer': optimizer.state_dict(),
                 'loss': train_loss,
             }, filename=checkpoint_filename)

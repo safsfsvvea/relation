@@ -608,6 +608,14 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         img_anno = self.annotations[self.ids[idx]]
+        # print("img_anno: ", img_anno)
+        # debug for trainset index 59
+        # img_anno['hoi_annotation']=img_anno['hoi_annotation'][:2]
+        # print("img_anno['hoi_annotation']: ", img_anno['hoi_annotation'])
+        # img_anno['annotations']=img_anno['annotations'][:4]
+        # print("img_anno['annotations']: ", img_anno['annotations'])
+        
+        
         target1 = {}
         img = Image.open(self.img_folder / img_anno['file_name']).convert('RGB')
         # print(img_anno['file_name'])
@@ -1109,6 +1117,18 @@ def make_hico_det_transforms(image_set):
         ])
     raise ValueError(f'unknown {image_set}')
 
+# Add the transforms of train and test the same
+def make_no_transforms():
+    normalize = T_det.Compose([
+        T_det.ToTensor(),
+        T_det.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+    return T_det.Compose([
+            T_det.RandomResize([800], max_size=1333),
+            normalize,
+        ])
+
 def save_image_tensor2cv2(input_tensor: torch.Tensor, filename):
     """
     将tensor保存为cv2格式
@@ -1181,8 +1201,15 @@ def build(image_set, args):
             print("args.use_correct_subject_category_hico: ", args.use_correct_subject_category_hico)
             print("args.relation_label_noise: ", args.relation_label_noise)
         elif args.dataset_file == 'hico_det_gt':
-            dataset = HICODetection_det_gt(image_set, img_folder, anno_file, detection_results = args.hico_det_file, transforms=make_hico_det_transforms(image_set),
+            if args.notransform: 
+                #暂时关闭transform以debug
+                print("use the same transform as testing when training!!!!!!")
+                dataset = HICODetection_det_gt(image_set, img_folder, anno_file, detection_results = args.hico_det_file, transforms=make_no_transforms(),
                                 num_queries=args.num_queries, args = args)
+            else:
+                dataset = HICODetection_det_gt(image_set, img_folder, anno_file, detection_results = args.hico_det_file, transforms=make_hico_det_transforms(image_set),
+                                num_queries=args.num_queries, args = args)
+            
         else:
             dataset = HICODetection(image_set, img_folder, anno_file, transforms=make_hico_transforms(image_set),
                                     num_queries=args.num_queries, args = args)

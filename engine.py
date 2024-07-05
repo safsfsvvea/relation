@@ -237,32 +237,56 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     model.train()
     # detector.model.train()
     start_time = time.time()
-    epoch_loss = 0.0
+    
+    epoch_relation_loss  = 0.0
+    epoch_binary_loss = 0.0  # 新增，用于记录二分类损失
+    epoch_loss  = 0.0
+    
     num_batches = len(data_loader)
     
     no_pairs_batches = 0  # 用于统计 "No pairs found for this batch." 出现的 batch 数量
     no_results_images = 0  # 用于统计 "No results found for this image." 出现的图片数量
     total_images = 0  # 用于统计总的图片数量
+    subject_label_mismatches = 0
+    object_label_mismatches = 0
+    subject_box_mismatches = 0
+    object_box_mismatches = 0
+    total_pairs = 0  # 总的 matcher pairs 数量
     progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}")
     
     scaler = GradScaler()  # 初始化 GradScaler
     optimizer.zero_grad()
     has_non_zero_loss = False  # 标志位，跟踪是否有非零损失的累积
 
+    # debug
+    # input = []
+    
     for batch_idx, (images, targets, detections) in progress_bar:
 
         images = images.to(device)
-        targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
+        # input.append((images, targets, detections))
+        # targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
+        targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
+        # print("filename: ", targets[0]['filename'])
         
         with autocast():  # 使用 autocast 进行混合精度前向传播
-            out = model(images, targets, detections)
-  
+            out = model(images, detections)
+            # print("out: ", out)
+            # for image_results in out:
+            #     for hoi in image_results:
+            #         relation_score = torch.sigmoid(hoi['relation_score'])
+            #         max_score, max_index = torch.max(F.softmax(relation_score, dim=0), dim=0)
+            #         print(f"Highest probability relation score: {max_score.item()}, Index: {max_index.item()}")
         if not all(len(output) == 0 for output in out):
             with autocast():  # 使用 autocast 进行混合精度损失计算
-                loss = criterion(out, targets)
+                relation_loss, binary_loss = criterion(out, targets)
+                loss = relation_loss + binary_loss * 0.1
             if loss > 0:
+                relation_loss = relation_loss / accumulation_steps  # 损失均摊到梯度累积步骤数
+                binary_loss = binary_loss / accumulation_steps  # 损失均摊到梯度累积步骤数
                 loss = loss / accumulation_steps  # 损失均摊到梯度累积步骤数
-                scaler.scale(loss).backward()  # 使用 GradScaler 进行反向传播
+                scaler.scale(loss).backward()  
+
                 has_non_zero_loss = True  # 设置标志位
                 
                 if (batch_idx + 1) % accumulation_steps == 0:
@@ -270,49 +294,84 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
                     scaler.update()
                     optimizer.zero_grad()  # 清空梯度
         else:
-            loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
-            scaler.scale(loss).backward()
-        epoch_loss += loss.item() * accumulation_steps  # 还原累计损失
+            relation_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
+            binary_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
+            loss = relation_loss + binary_loss * 0.1
+            scaler.scale(loss).backward() 
+        epoch_binary_loss += binary_loss.item() * accumulation_steps  # 修改，记录二分类损失
+        epoch_relation_loss += relation_loss.item() * accumulation_steps  # 修改，记录多分类损失
+        epoch_loss += loss.item() * accumulation_steps
         
         no_pairs_batches += model.no_pairs_count
         no_results_images += model.no_results_count
         total_images += len(targets)  # 更新总的图片数量
         
+        subject_label_mismatches += criterion.subject_label_mismatch
+        object_label_mismatches += criterion.object_label_mismatch
+        subject_box_mismatches += criterion.subject_box_mismatch
+        object_box_mismatches += criterion.object_box_mismatch
+        total_pairs += criterion.total_pairs
+        
         if (batch_idx + 1) % print_freq == 0:
+            avg_binary_loss = epoch_binary_loss / (batch_idx + 1)  # 修改，计算平均二分类损失
+            avg_relation_loss = epoch_relation_loss / (batch_idx + 1)  # 修改，计算平均多分类损失
             avg_loss = epoch_loss / (batch_idx + 1)
             elapsed_time = time.time() - start_time
             eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
-            
-            progress_bar.set_postfix(loss=f"{avg_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")
+            progress_bar.set_postfix(total_loss=f"{avg_loss:.4f}", binary_loss=f"{avg_binary_loss:.4f}", relation_loss=f"{avg_relation_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")  # 修改，显示二分类和多分类损失
         
         model.no_pairs_count = 0  # 重置计数器
         model.no_results_count = 0  # 重置计数器
         
+        criterion.subject_label_mismatch = 0
+        criterion.object_label_mismatch = 0
+        criterion.subject_box_mismatch = 0
+        criterion.object_box_mismatch = 0
+        criterion.total_pairs = 0
+        
         # 保存训练中间信息到tensorboard
         if tensorboard_writer is not None:
             global_step = epoch * num_batches + batch_idx
-            tensorboard_writer.add_scalar('train_loss', loss.item(), global_step=global_step)
+            tensorboard_writer.add_scalar('train_total_loss', loss.item(), global_step=global_step)  # 修改，记录总损失到Tensorboard
+            tensorboard_writer.add_scalar('train_binary_loss', binary_loss.item(), global_step=global_step)  # 修改，记录二分类损失到Tensorboard
+            tensorboard_writer.add_scalar('train_relation_loss', relation_loss.item(), global_step=global_step)  # 修改，记录多分类损失到Tensorboard
+
     if (batch_idx + 1) % accumulation_steps != 0 and has_non_zero_loss:
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad()
     
     if lr_scheduler is not None:
-        lr_scheduler.step(epoch_loss / num_batches)  # 根据当前 epoch 的平均损失更新学习率
+        lr_scheduler.step(epoch_loss  / num_batches)  # 根据当前 epoch 的平均损失更新学习率
     # 打印训练总时间
     elapsed_time = time.time() - start_time
-    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average loss: {epoch_loss / num_batches:.4f}")
+    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss  / num_batches:.4f}. Average relation loss: {epoch_relation_loss  / num_batches:.4f}. Average binary loss: {epoch_binary_loss  / num_batches:.4f}")
     
     no_pairs_ratio = no_pairs_batches / num_batches
     no_results_ratio = no_results_images / total_images
-
+    
+    subject_label_mismatch_ratio = subject_label_mismatches / total_pairs if total_pairs else 0
+    object_label_mismatch_ratio = object_label_mismatches / total_pairs if total_pairs else 0
+    subject_box_mismatch_ratio = subject_box_mismatches / total_pairs if total_pairs else 0
+    object_box_mismatch_ratio = object_box_mismatches / total_pairs if total_pairs else 0
+    
     print(f"No pairs found ratio: {no_pairs_ratio:.4f}")
     print(f"No results found ratio: {no_results_ratio:.4f}")
+    
+    print(f"Subject label mismatch ratio: {subject_label_mismatch_ratio:.4f}")
+    print(f"Object label mismatch ratio: {object_label_mismatch_ratio:.4f}")
+    print(f"Subject box mismatch ratio: {subject_box_mismatch_ratio:.4f}")
+    print(f"Object box mismatch ratio: {object_box_mismatch_ratio:.4f}")
 
     if tensorboard_writer is not None:
         tensorboard_writer.add_scalar('no_pairs_ratio', no_pairs_ratio, epoch)
         tensorboard_writer.add_scalar('no_results_ratio', no_results_ratio, epoch)
-    return epoch_loss / num_batches
+        
+        tensorboard_writer.add_scalar('subject_label_mismatch_ratio', subject_label_mismatch_ratio, epoch)
+        tensorboard_writer.add_scalar('object_label_mismatch_ratio', object_label_mismatch_ratio, epoch)
+        tensorboard_writer.add_scalar('subject_box_mismatch_ratio', subject_box_mismatch_ratio, epoch)
+        tensorboard_writer.add_scalar('object_box_mismatch_ratio', object_box_mismatch_ratio, epoch)
+    return epoch_loss / num_batches, epoch_relation_loss / num_batches, epoch_binary_loss  / num_batches
 
 
 @torch.no_grad()
@@ -327,33 +386,40 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     indices = []
     # filename_list = []
     print_freq = 500
-    for samples, targets, detections in metric_logger.log_every(data_loader, print_freq, header):
-        # targets: tuple, len(tuple) = batch_size
-        #          element in tuple: a dict, whose keys are ['orig_size', 'size', 'boxes', 'labels', 'id', 'hois']
-                 
-        # print(targets[0]['orig_size'])
-        # print(targets[0]['size'])
-        # print('')
-        samples = samples.to(device)
+    
+    #debug
+    # input = []
+    
+    with torch.no_grad():
+        for samples, targets, detections in metric_logger.log_every(data_loader, print_freq, header):
+            # targets: tuple, len(tuple) = batch_size
+            #          element in tuple: a dict, whose keys are ['orig_size', 'size', 'boxes', 'labels', 'id', 'hois']
+                    
+            # print(targets[0]['orig_size'])
+            # print(targets[0]['size'])
+            # print('')
+            samples = samples.to(device)
 
-        outputs = model(samples, targets, detections)
-        # print("outputs: ", outputs)
-        # loss = criterion(outputs, targets)
-        # print("loss: ", loss)
-        results = postprocessors(outputs, targets)
-        # print(results)
-        # print(len(list(itertools.chain.from_iterable(utils.all_gather(results)))))
-        # print(list(itertools.chain.from_iterable(utils.all_gather(results)))[0])
-        
-        # preds: merge predicted batch data
-        preds.extend(list(itertools.chain.from_iterable(utils.all_gather(results))))
-        # For avoiding a runtime error, the copy is used
-        # gts: merge ground truth batch data
-        gts.extend(list(itertools.chain.from_iterable(utils.all_gather(copy.deepcopy(targets)))))
-        
-        # break
-        # # Add for evaluation
-        # filename_list += [t['filename'] for t in targets]
+            # input.append((samples, targets, detections))
+            
+            outputs = model(samples, detections)
+            # print("outputs: ", outputs)
+            # loss = criterion(outputs, targets)
+            # print("loss: ", loss)
+            results = postprocessors(outputs, detections)
+            # print(results)
+            # print(len(list(itertools.chain.from_iterable(utils.all_gather(results)))))
+            # print(list(itertools.chain.from_iterable(utils.all_gather(results)))[0])
+            
+            # preds: merge predicted batch data
+            preds.extend(list(itertools.chain.from_iterable(utils.all_gather(results))))
+            # For avoiding a runtime error, the copy is used
+            # gts: merge ground truth batch data
+            gts.extend(list(itertools.chain.from_iterable(utils.all_gather(copy.deepcopy(targets)))))
+            
+            # break
+            # # Add for evaluation
+            # filename_list += [t['filename'] for t in targets]
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -391,20 +457,35 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     if preds[0]:
         import torch.nn.functional as F
 
-        # 假设 preds[0]['verb_scores'] 是 PyTorch 张量
+        # # 假设 preds[0]['verb_scores'] 是 PyTorch 张量
         logits = preds[0]['verb_scores']
-        verb_labels = torch.zeros((1,117), device='cuda:0')
-        verb_labels[0][gts[0]['hois'][:, 2]] = 1
+        # verb_labels = torch.zeros((1,117), device='cuda:0')
+        # verb_labels[0][gts[0]['hois'][:, 2]] = 1
 
-        print("One-hot encoded verb_labels:", verb_labels)
-        focal_loss = criterion.focal_loss(logits, verb_labels)
-        bce_loss = criterion.bce_loss(logits, verb_labels)
-        print("focal loss: ", focal_loss)
-        print("bce loss: ", bce_loss)
+        # print("One-hot encoded verb_labels:", verb_labels)
+        # print("verb_labels shape: ", verb_labels.shape)
+        # print("logits shape: ", logits.shape)
+        # try:
+        #     focal_loss = criterion.focal_loss(logits, verb_labels)
+        # except Exception as e:
+        #     focal_loss = None
+        #     print(f"Error calculating focal loss: {e}")
+
+        # try:
+        #     bce_loss = criterion.bce_loss(logits, verb_labels)
+        # except Exception as e:
+        #     bce_loss = None
+        #     print(f"Error calculating bce loss: {e}")
+
+        # if focal_loss is not None:
+        #     print("focal loss: ", focal_loss)
+
+        # if bce_loss is not None:
+        #     print("bce loss: ", bce_loss)
         # 转换 logits 为概率
-        probabilities = F.softmax(logits, dim=1)
+        # probabilities = F.softmax(logits, dim=1)
 
-        sorted_probabilities, sorted_indices = torch.sort(probabilities, dim=1, descending=True)
+        sorted_probabilities, sorted_indices = torch.sort(logits, dim=1, descending=True)
         num_hois = len(gts[0]['hois'])
         top_probabilities = sorted_probabilities[:, :num_hois]
         top_labels = sorted_indices[:, :num_hois]
@@ -413,7 +494,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
 
         print("-----------------")
         print("preds[0]: ", preds[0])
-        print("预测的概率: ", probabilities)
+        print("预测的概率: ", logits)
         print("每个样本最高的概率值: ", top_probabilities)
         print("预测的标签索引: ", top_labels)
         print("preds[0]['labels']: ", preds[0]['labels'].shape)
