@@ -12,7 +12,7 @@ from util.box_ops import box_cxcywh_to_xyxy
 from torchvision.ops import box_iou
 
 class HOIModel(nn.Module):
-    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False):
         super(HOIModel, self).__init__()
         self.backbone = backbone
         self.device = device
@@ -25,6 +25,7 @@ class HOIModel(nn.Module):
         self.iou_threshold = iou_threshold
         self.num_category = 117 if not add_negative_category else 118
         self.topK = topK
+        self.positive_negative = positive_negative
         if not use_LN:
         #     self.mlp = nn.Sequential(
         #     nn.Linear(2 * feature_dim, 512),
@@ -51,49 +52,51 @@ class HOIModel(nn.Module):
                 # nn.Dropout(p=0.5), 
                 nn.Linear(64, self.num_category)  
             )
-            self.positive_negative = nn.Sequential(
-                nn.Linear(2 * feature_dim, 1024),
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(1024, 512),
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(512, 256),
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(256, 128),
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(128, 64),
-                nn.ReLU(),
-                # nn.Dropout(p=0.5), 
-                nn.Linear(64, 2)  
-            )
+            if self.positive_negative:
+                self.positive_negative_mlp = nn.Sequential(
+                    nn.Linear(2 * feature_dim, 1024),
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(1024, 512),
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(512, 256),
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(256, 128),
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(128, 64),
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5), 
+                    nn.Linear(64, 2)  
+                )
         else:
             print("use LN")
-            self.positive_negative = nn.Sequential(
-                nn.Linear(2 * feature_dim, 1024),
-                nn.LayerNorm(1024),  
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(1024, 512),
-                nn.LayerNorm(512),  
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(512, 256),
-                nn.LayerNorm(256),  
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(256, 128),
-                nn.LayerNorm(128),  
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(128, 64),
-                nn.LayerNorm(64),  
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(64, 2)  
-            )
+            if self.positive_negative:
+                self.positive_negative_mlp = nn.Sequential(
+                    nn.Linear(2 * feature_dim, 1024),
+                    nn.LayerNorm(1024),  
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(1024, 512),
+                    nn.LayerNorm(512),  
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(512, 256),
+                    nn.LayerNorm(256),  
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(256, 128),
+                    nn.LayerNorm(128),  
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(128, 64),
+                    nn.LayerNorm(64),  
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(64, 2)  
+                )
             self.mlp = nn.Sequential(
                 nn.Linear(2 * feature_dim, 1024),
                 nn.LayerNorm(1024),  
@@ -263,7 +266,7 @@ class HOIModel(nn.Module):
     
     def forward(self, nested_tensor: NestedTensor, detections_batch):
         images = nested_tensor.tensors
-        print("image size", images.size())
+        # print("image size", images.size())
         mask = nested_tensor.mask
         batch_size = images.size(0)
         # print("detections_batch: ", detections_batch)
@@ -305,8 +308,8 @@ class HOIModel(nn.Module):
             
             pair_start_indices.append(current_index)
             # 生成所有有效的 human-object pairs
-            print("len(human_features): ", len(human_features))
-            print("len(object_features): ", len(object_features))
+            # print("len(human_features): ", len(human_features))
+            # print("len(object_features): ", len(object_features))
             
             # for human1 in human_features:
             #     for human2 in human_features:
@@ -379,14 +382,15 @@ class HOIModel(nn.Module):
                         'binary_score': None
                     })
                     current_index += 1
-        print("len(all_pairs): ", len(all_pairs))
+        # print("len(all_pairs): ", len(all_pairs))
         if all_pairs:
             all_pairs_tensor = torch.cat(all_pairs, dim=0)
-            positive_logits = self.positive_negative(all_pairs_tensor)
-            positive_probs = F.softmax(positive_logits, dim=-1)  # 转换为概率分布
-            positive_labels = (positive_probs[:, 1] > 0.5).squeeze().bool()  # 选择正类概率大于0.5的样本
-            for i, logit in enumerate(positive_logits):
-                hoi_results[i]['binary_score'] = logit
+            if self.positive_negative:
+                positive_logits = self.positive_negative_mlp(all_pairs_tensor)
+                # positive_probs = F.softmax(positive_logits, dim=-1)  # 转换为概率分布
+                # positive_labels = (positive_probs[:, 1] > 0.5).squeeze().bool()  # 选择正类概率大于0.5的样本
+                for i, logit in enumerate(positive_logits):
+                    hoi_results[i]['binary_score'] = logit
             relation_scores = self.mlp(all_pairs_tensor)
             for i, score in enumerate(relation_scores):
                 hoi_results[i]['relation_score'] = score
@@ -425,10 +429,12 @@ class HOIModel(nn.Module):
 
 
 class PostProcessHOI(nn.Module):
-    def __init__(self, relation_threshold=0.0, device='cuda'):
+    def __init__(self, relation_threshold=0.0, positive_negative=False, device='cuda'):
         super().__init__()
         self.relation_threshold = relation_threshold
         print("self.relation_threshold: ", self.relation_threshold)
+        self.positive_negative = positive_negative
+        print("self.positive_negative: ", self.positive_negative)
         self.device = device
 
     def forward(self, batch_hoi_results, detections):
@@ -452,14 +458,14 @@ class PostProcessHOI(nn.Module):
             scale_h = orig_size[0].float() / current_size[0].float()  # 高度比例
             # 对每个图像的HOI结果进行处理
             for hoi in image_results:
-                print("hoi['binary_score']: ", hoi['binary_score'])
-                if hoi['binary_score'][1] > hoi['binary_score'][0]: 
-                    print("negative!!!!!!!!")
-                    print("hoi['binary_score']: ", hoi['binary_score'])
+                # print("hoi['binary_score']: ", hoi['binary_score'])
+                if self.positive_negative and hoi['binary_score'][1] > hoi['binary_score'][0]: 
+                    # print("negative!!!!!!!!")
+                    # print("hoi['binary_score']: ", hoi['binary_score'])
                     relation_probs = torch.zeros_like(hoi['relation_score']).to(self.device)
                 else:
-                    print("positive!!!!!!!!")
-                    print("hoi['binary_score']: ", hoi['binary_score'])
+                    # print("positive!!!!!!!!")
+                    # print("hoi['binary_score']: ", hoi['binary_score'])
                     relation_probs = torch.sigmoid(hoi['relation_score'].to(self.device))
 
                 if torch.any(relation_probs > self.relation_threshold):
@@ -514,13 +520,14 @@ class PostProcessHOI(nn.Module):
         return processed_results
 
 class CriterionHOI(nn.Module):
-    def __init__(self, matcher, device, alpha=0.25, gamma=2.0, loss_type='focal', add_negative_category=False):
+    def __init__(self, matcher, device, alpha=0.25, gamma=2.0, loss_type='focal', add_negative_category=False, positive_negative=False):
         super().__init__()
         self.matcher = matcher
         self.device = device
         self.alpha = alpha
         self.gamma = gamma
         self.loss_type = loss_type
+        print("loss type: ", self.loss_type)
         # 初始化不匹配计数器
         self.subject_label_mismatch = 0
         self.object_label_mismatch = 0
@@ -529,7 +536,7 @@ class CriterionHOI(nn.Module):
         self.total_pairs = 0
         self.add_negative_category = add_negative_category
         self.num_category = 117 if not add_negative_category else 118
-        
+        self.positive_negative = positive_negative
     def forward(self, outputs, targets):
         """
         计算模型输出与目标之间的Focal Loss。
@@ -543,8 +550,8 @@ class CriterionHOI(nn.Module):
         # 使用匹配器找到最优匹配
         matched_indices = self.matcher(outputs, targets)
         # print("matched_indices: ", matched_indices)
-        relation_loss = 0.0
-        binary_loss= 0.0
+        relation_loss = torch.tensor(0.0, device=self.device)
+        binary_loss= torch.tensor(0.0, device=self.device)
         num_processed = 0  # 记录参与损失计算的图像数
         # print("len(outputs)", len(outputs))
         # print("len(targets)", len(targets))
@@ -568,7 +575,8 @@ class CriterionHOI(nn.Module):
                 # 收集所有匹配对的预测logits和目标labels
                 # print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
                 matched_pred_verb_scores.append(pred[sub_idx]['relation_score'])
-                matched_pred_binary_scores.append(pred[sub_idx]['binary_score'])
+                if self.positive_negative:
+                    matched_pred_binary_scores.append(pred[sub_idx]['binary_score'])
                 # 使用 [1, 0] 作为正类标签
                 matched_binary_labels.append(torch.tensor([1, 0], device=self.device).unsqueeze(0))
                 
@@ -624,25 +632,26 @@ class CriterionHOI(nn.Module):
                     negative_labels[:, -1] = 1  # 将标签设置为第118类
                     matched_tgt_verb_labels += [negative_labels]
 
-            unmatched_pred_binary_scores = []
-            for i in range(len(pred)):
-                if i not in sub_inds:
-                    unmatched_pred_binary_scores.append(pred[i]['binary_score'])
-            print("unmatched_pred_binary_scores len: ", len(unmatched_pred_binary_scores))
-            if unmatched_pred_binary_scores:
-                matched_pred_binary_scores += unmatched_pred_binary_scores
-                negative_labels = torch.tensor([[0, 1]] * len(unmatched_pred_binary_scores), device=self.device)
-                matched_binary_labels.append(negative_labels)
-        if matched_pred_binary_scores:
+            if self.positive_negative:
+                unmatched_pred_binary_scores = []
+                for i in range(len(pred)):
+                    if i not in sub_inds:
+                        unmatched_pred_binary_scores.append(pred[i]['binary_score'])
+                # print("unmatched_pred_binary_scores len: ", len(unmatched_pred_binary_scores))
+                if unmatched_pred_binary_scores:
+                    matched_pred_binary_scores += unmatched_pred_binary_scores
+                    negative_labels = torch.tensor([[0, 1]] * len(unmatched_pred_binary_scores), device=self.device)
+                    matched_binary_labels.append(negative_labels)
+        if self.positive_negative and matched_pred_binary_scores:
             matched_pred_binary_scores = torch.stack([tensor for tensor in matched_pred_binary_scores]).requires_grad_(True)
             matched_binary_labels = torch.cat(matched_binary_labels, dim=0) #.requires_grad_(True)
             if self.loss_type == 'focal':
-                # binary_loss = self.focal_loss(matched_pred_binary_scores, matched_binary_labels.float())
+                binary_loss = self.focal_loss(matched_pred_binary_scores, matched_binary_labels.float())
                 # binary_loss = F.cross_entropy(matched_pred_binary_scores, matched_binary_labels.argmax(dim=1))
-                print("matched_pred_binary_scores: ", matched_pred_binary_scores)
-                print("matched_binary_labels: ", matched_binary_labels)
-                binary_loss = self.bce_loss(matched_pred_binary_scores, matched_binary_labels.float()) 
-                print("binary_loss: ", binary_loss)
+                # print("matched_pred_binary_scores: ", matched_pred_binary_scores)
+                # print("matched_binary_labels: ", matched_binary_labels)
+                # binary_loss = self.bce_loss(matched_pred_binary_scores, matched_binary_labels.float()) 
+                # print("binary_loss: ", binary_loss)
             elif self.loss_type == 'bce':
                 binary_loss = self.bce_loss(matched_pred_binary_scores, matched_binary_labels.float())      
               
@@ -652,7 +661,7 @@ class CriterionHOI(nn.Module):
 
             if self.loss_type == 'focal':
                 relation_loss = self.focal_loss(matched_pred_verb_scores, matched_tgt_verb_labels)
-                print("relation_loss: ", relation_loss)
+                # print("relation_loss: ", relation_loss)
             elif self.loss_type == 'bce':
                 relation_loss = self.bce_loss(matched_pred_verb_scores, matched_tgt_verb_labels)
 

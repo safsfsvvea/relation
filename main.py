@@ -64,6 +64,7 @@ def get_args_parser():
     #mlp
     parser.add_argument('--use_LN', action='store_true', help='use LayerNorm.')
     parser.add_argument('--add_negative_category', action='store_true', help='add negative category.')
+    parser.add_argument('--positive_negative', action='store_true', help='add positive negative mlp.')
 
     # * Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
@@ -528,7 +529,7 @@ def main(args):
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK)
+    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative)
     matcher = HungarianMatcherHOI_det(
         device=device,
         cost_obj_class=args.set_cost_obj_class,
@@ -537,7 +538,7 @@ def main(args):
         cost_giou=args.set_cost_giou,
         add_negative_category=args.add_negative_category
     )
-    criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category)
+    criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category, positive_negative=args.positive_negative)
     # optimizer = torch.optim.AdamW([
     # {'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr},
     # {'params': filter(lambda p: p.requires_grad, detector.parameters()), 'lr': args.lr_detector},
@@ -574,7 +575,7 @@ def main(args):
         print("Total number of parameters in optimizer mlp:", mlp_params_count)
     lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, threshold=0.0001, min_lr=1e-6)
     
-    postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
+    postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, positive_negative=args.positive_negative, device=device)
     if args.pretrained:
         print(f"Loading pretrained model from {args.pretrained}")
         checkpoint = torch.load(args.pretrained, map_location='cpu')
@@ -611,8 +612,8 @@ def main(args):
             print("args.index here!!!")
             subset_indices = [args.index]
         else:
-            # subset_indices = list(range(min(args.subset_size, len(dataset_train))))
-            subset_indices = [42, 49]
+            subset_indices = list(range(min(args.subset_size, len(dataset_train))))
+            # subset_indices = [42, 49]
             # subset_indices = [43, 49, 56, 57]
             # excluded_indices = {43, 47, 49, 56, 57, 59}
             # subset_indices = [i for i in range(2 * args.subset_size, min(3 * args.subset_size, len(dataset_train))) if i not in excluded_indices]
@@ -723,9 +724,9 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss, binary_loss, train_input = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=None, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
+            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=None, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
             state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
-            if args.output_dir and epoch % 10 == 0:
+            if args.output_dir and epoch % 100 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                 checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
                 checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
@@ -752,17 +753,17 @@ def main(args):
                 
                 print(f"Best model saved to {best_model_filename} at epoch {epoch}")
             if epoch % 5 == 0 or epoch == num_epochs - 1:
-                train_state_dict = copy.deepcopy(model.state_dict())
-                test_stats, test_input = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
-                test_state_dict = copy.deepcopy(model.state_dict())
-                assert torch.equal(train_input[0][0].tensors, test_input[0][0].tensors), "Train and test images are different"
-                assert torch.equal(train_input[0][0].mask, test_input[0][0].mask), "Train and test masks are different"
-                print("train target: ", train_input[0][1])
-                print("test target: ", test_input[0][1])
-                print("train detection: ", train_input[0][2])
-                print("test detection: ", test_input[0][2])
-                for key in train_state_dict:
-                    assert torch.equal(train_state_dict[key], test_state_dict[key]), f"Train and test model parameters are different for key: {key}"
+                # train_state_dict = copy.deepcopy(model.state_dict())
+                test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
+                # test_state_dict = copy.deepcopy(model.state_dict())
+                # assert torch.equal(train_input[0][0].tensors, test_input[0][0].tensors), "Train and test images are different"
+                # assert torch.equal(train_input[0][0].mask, test_input[0][0].mask), "Train and test masks are different"
+                # print("train target: ", train_input[0][1])
+                # print("test target: ", test_input[0][1])
+                # print("train detection: ", train_input[0][2])
+                # print("test detection: ", test_input[0][2])
+                # for key in train_state_dict:
+                #     assert torch.equal(train_state_dict[key], test_state_dict[key]), f"Train and test model parameters are different for key: {key}"
                 tensorboard_writer.add_scalar('Test/mAP', test_stats['mAP'], epoch)
                 
                 if test_stats['mAP'] > best_map:

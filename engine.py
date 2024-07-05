@@ -240,6 +240,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     
     epoch_relation_loss  = 0.0
     epoch_binary_loss = 0.0  # 新增，用于记录二分类损失
+    epoch_loss  = 0.0
     
     num_batches = len(data_loader)
     
@@ -258,32 +259,33 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     has_non_zero_loss = False  # 标志位，跟踪是否有非零损失的累积
 
     # debug
-    input = []
+    # input = []
     
     for batch_idx, (images, targets, detections) in progress_bar:
 
         images = images.to(device)
-        input.append((images, targets, detections))
+        # input.append((images, targets, detections))
         # targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
         targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        print("filename: ", targets[0]['filename'])
+        # print("filename: ", targets[0]['filename'])
         
         with autocast():  # 使用 autocast 进行混合精度前向传播
             out = model(images, detections)
-            print("out: ", out)
-            for image_results in out:
-                for hoi in image_results:
-                    relation_score = torch.sigmoid(hoi['relation_score'])
-                    max_score, max_index = torch.max(F.softmax(relation_score, dim=0), dim=0)
-                    print(f"Highest probability relation score: {max_score.item()}, Index: {max_index.item()}")
+            # print("out: ", out)
+            # for image_results in out:
+            #     for hoi in image_results:
+            #         relation_score = torch.sigmoid(hoi['relation_score'])
+            #         max_score, max_index = torch.max(F.softmax(relation_score, dim=0), dim=0)
+            #         print(f"Highest probability relation score: {max_score.item()}, Index: {max_index.item()}")
         if not all(len(output) == 0 for output in out):
             with autocast():  # 使用 autocast 进行混合精度损失计算
                 relation_loss, binary_loss = criterion(out, targets)
-            if binary_loss > 0 or relation_loss > 0:
-                binary_loss = binary_loss / accumulation_steps  # 损失均摊到梯度累积步骤数
+                loss = relation_loss + binary_loss * 0.1
+            if loss > 0:
                 relation_loss = relation_loss / accumulation_steps  # 损失均摊到梯度累积步骤数
-                scaler.scale(binary_loss).backward(retain_graph=True)  # 修改，分别对二分类损失进行反向传播
-                scaler.scale(relation_loss).backward()  # 修改，分别对多分类损失进行反向传播
+                binary_loss = binary_loss / accumulation_steps  # 损失均摊到梯度累积步骤数
+                loss = loss / accumulation_steps  # 损失均摊到梯度累积步骤数
+                scaler.scale(loss).backward()  
 
                 has_non_zero_loss = True  # 设置标志位
                 
@@ -294,11 +296,11 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         else:
             relation_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
             binary_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
-            scaler.scale(binary_loss).backward(retain_graph=True)  # 修改，分别对二分类损失进行反向传播
-            scaler.scale(relation_loss).backward()  # 修改，分别对多分类损失进行反向传播
+            loss = relation_loss + binary_loss * 0.1
+            scaler.scale(loss).backward() 
         epoch_binary_loss += binary_loss.item() * accumulation_steps  # 修改，记录二分类损失
         epoch_relation_loss += relation_loss.item() * accumulation_steps  # 修改，记录多分类损失
-
+        epoch_loss += loss.item() * accumulation_steps
         
         no_pairs_batches += model.no_pairs_count
         no_results_images += model.no_results_count
@@ -313,9 +315,10 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         if (batch_idx + 1) % print_freq == 0:
             avg_binary_loss = epoch_binary_loss / (batch_idx + 1)  # 修改，计算平均二分类损失
             avg_relation_loss = epoch_relation_loss / (batch_idx + 1)  # 修改，计算平均多分类损失
+            avg_loss = epoch_loss / (batch_idx + 1)
             elapsed_time = time.time() - start_time
             eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
-            progress_bar.set_postfix(binary_loss=f"{avg_binary_loss:.4f}", relation_loss=f"{avg_relation_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")  # 修改，显示二分类和多分类损失
+            progress_bar.set_postfix(total_loss=f"{avg_loss:.4f}", binary_loss=f"{avg_binary_loss:.4f}", relation_loss=f"{avg_relation_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")  # 修改，显示二分类和多分类损失
         
         model.no_pairs_count = 0  # 重置计数器
         model.no_results_count = 0  # 重置计数器
@@ -329,6 +332,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         # 保存训练中间信息到tensorboard
         if tensorboard_writer is not None:
             global_step = epoch * num_batches + batch_idx
+            tensorboard_writer.add_scalar('train_total_loss', loss.item(), global_step=global_step)  # 修改，记录总损失到Tensorboard
             tensorboard_writer.add_scalar('train_binary_loss', binary_loss.item(), global_step=global_step)  # 修改，记录二分类损失到Tensorboard
             tensorboard_writer.add_scalar('train_relation_loss', relation_loss.item(), global_step=global_step)  # 修改，记录多分类损失到Tensorboard
 
@@ -338,10 +342,10 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         optimizer.zero_grad()
     
     if lr_scheduler is not None:
-        lr_scheduler.step(epoch_relation_loss  / num_batches)  # 根据当前 epoch 的平均损失更新学习率
+        lr_scheduler.step(epoch_loss  / num_batches)  # 根据当前 epoch 的平均损失更新学习率
     # 打印训练总时间
     elapsed_time = time.time() - start_time
-    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average relation loss: {epoch_relation_loss  / num_batches:.4f}. Average binary loss: {epoch_binary_loss  / num_batches:.4f}")
+    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss  / num_batches:.4f}. Average relation loss: {epoch_relation_loss  / num_batches:.4f}. Average binary loss: {epoch_binary_loss  / num_batches:.4f}")
     
     no_pairs_ratio = no_pairs_batches / num_batches
     no_results_ratio = no_results_images / total_images
@@ -367,7 +371,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         tensorboard_writer.add_scalar('object_label_mismatch_ratio', object_label_mismatch_ratio, epoch)
         tensorboard_writer.add_scalar('subject_box_mismatch_ratio', subject_box_mismatch_ratio, epoch)
         tensorboard_writer.add_scalar('object_box_mismatch_ratio', object_box_mismatch_ratio, epoch)
-    return epoch_relation_loss / num_batches, epoch_binary_loss  / num_batches, input
+    return epoch_loss / num_batches, epoch_relation_loss / num_batches, epoch_binary_loss  / num_batches
 
 
 @torch.no_grad()
@@ -384,7 +388,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     print_freq = 500
     
     #debug
-    input = []
+    # input = []
     
     with torch.no_grad():
         for samples, targets, detections in metric_logger.log_every(data_loader, print_freq, header):
@@ -396,10 +400,10 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
             # print('')
             samples = samples.to(device)
 
-            input.append((samples, targets, detections))
+            # input.append((samples, targets, detections))
             
             outputs = model(samples, detections)
-            print("outputs: ", outputs)
+            # print("outputs: ", outputs)
             # loss = criterion(outputs, targets)
             # print("loss: ", loss)
             results = postprocessors(outputs, detections)
@@ -510,7 +514,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     #     print("-----------------")
     # print("len(gts): ", len(gts))
     print("gts[0]: ", gts[0]) 
-    return stats, input
+    return stats
 
 def evaluate_det_hico(model, data_loader, device, args):
     model.eval()
