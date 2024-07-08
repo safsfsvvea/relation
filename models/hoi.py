@@ -205,10 +205,10 @@ class HOIModel(nn.Module):
         all_scores = []
         image_indices = []
 
-        scale_factor = self.patch_size / 2  
+        scale_factor = self.patch_size  
 
         for image_index, (detections, target) in enumerate(zip(detections_batch, targets)):
-            H, W = target['size']
+            H, W = detections['size']
             if detections['boxes'].numel() == 0:  
                 continue
 
@@ -273,7 +273,7 @@ class HOIModel(nn.Module):
         batch_denoised_features, _, scales = self.backbone(images)
 
         batch_denoised_features = batch_denoised_features.permute(0, 3, 1, 2)
-        batch_denoised_features = F.interpolate(batch_denoised_features, scale_factor=2, mode='bilinear', align_corners=True)
+        # batch_denoised_features = F.interpolate(batch_denoised_features, scale_factor=2, mode='bilinear', align_corners=True)
 
         
         rois, additional_info, detection_counts= self.prepare_rois_cpu(detections_batch)
