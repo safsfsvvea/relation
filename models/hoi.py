@@ -26,6 +26,7 @@ class HOIModel(nn.Module):
         self.num_category = 117 if not add_negative_category else 118
         self.topK = topK
         self.positive_negative = positive_negative
+        self.multihead_attn = nn.MultiheadAttention(feature_dim, 8, dropout=0.1)
         if not use_LN:
         #     self.mlp = nn.Sequential(
         #     nn.Linear(2 * feature_dim, 512),
@@ -136,7 +137,7 @@ class HOIModel(nn.Module):
         all_scores = []
         image_indices = []
 
-        scale_factor = self.patch_size / 2  
+        scale_factor = self.patch_size 
 
         
         def process_image(image_index, detections):
@@ -273,12 +274,13 @@ class HOIModel(nn.Module):
         batch_denoised_features, _, scales = self.backbone(images)
 
         batch_denoised_features = batch_denoised_features.permute(0, 3, 1, 2)
+        # print("batch_denoised_features before: ", batch_denoised_features.shape)
         # batch_denoised_features = F.interpolate(batch_denoised_features, scale_factor=2, mode='bilinear', align_corners=True)
-
+        # print("batch_denoised_features after: ", batch_denoised_features.shape)
         
         rois, additional_info, detection_counts= self.prepare_rois_cpu(detections_batch)
 
-        output_size = (1, 1)
+        output_size = (7, 7)
 
         pooled_features = roi_align(batch_denoised_features, rois, output_size)
 
@@ -294,10 +296,11 @@ class HOIModel(nn.Module):
             object_features = []
 
             for feat, det_info in zip(features, info):
+                print("feat size: ", feat.shape)
                 if det_info['label'] == self.person_category_id:
-                    human_features.append((feat.view(-1), det_info['score'], det_info['label'], det_info['bbox']))
+                    human_features.append((feat.view(self.feature_dim, -1), det_info['score'], det_info['label'], det_info['bbox']))
                 else:
-                    object_features.append((feat.view(-1), det_info['score'], det_info['label'], det_info['bbox']))
+                    object_features.append((feat.view(self.feature_dim, -1), det_info['score'], det_info['label'], det_info['bbox']))
 
             # 排序并限制 human 和 object 的数量
             human_features.sort(key=lambda x: -x[1])
@@ -365,6 +368,9 @@ class HOIModel(nn.Module):
              
             for human in human_features:
                 for obj in object_features:
+                    print("human[0].shape: ", human[0].shape)
+                    print("obj[0].shape: ", obj[0].shape)
+                    
                     combined_feature = torch.cat([human[0], obj[0]], dim=0)
                     # human_feature = human[0]
                     # obj_feature = obj[0]
