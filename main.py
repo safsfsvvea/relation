@@ -585,7 +585,17 @@ def main(args):
         else:
             relation_state_dict = checkpoint['state_dict']
             model_state_dict = model.state_dict()
-            model_state_dict.update(relation_state_dict)  # 只更新模型中不包含 `backbone` 的参数
+            
+            filtered_relation_state_dict = {k: v for k, v in relation_state_dict.items() if k not in [
+            "positive_negative.0.weight", "positive_negative.0.bias", 
+            "positive_negative.2.weight", "positive_negative.2.bias", 
+            "positive_negative.4.weight", "positive_negative.4.bias", 
+            "positive_negative.6.weight", "positive_negative.6.bias", 
+            "positive_negative.8.weight", "positive_negative.8.bias", 
+            "positive_negative.10.weight", "positive_negative.10.bias"
+        ]}
+            model_state_dict.update(filtered_relation_state_dict)
+            # model_state_dict.update(relation_state_dict)  # 只更新模型中不包含 `backbone` 的参数
             model.load_state_dict(model_state_dict)
             print("Loaded relation state dict")
 
