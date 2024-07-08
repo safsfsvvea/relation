@@ -136,7 +136,7 @@ class HOIModel(nn.Module):
         all_scores = []
         image_indices = []
 
-        scale_factor = self.patch_size / 2  
+        scale_factor = self.patch_size 
 
         
         def process_image(image_index, detections):
