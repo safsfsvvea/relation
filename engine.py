@@ -106,49 +106,55 @@ def backbone_time(backbone, criterion, optimizer, data_loader, device, epoch, pr
     log_dir = '/bd_targaryen/users/clin/relation/logs/log_noamp_4'
     os.makedirs(log_dir, exist_ok=True)
     
-    schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1)
-    profiler = torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-        schedule=schedule,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(log_dir),
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True
-    )
+    # schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1)
+    # profiler = torch.profiler.profile(
+    #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+    #     schedule=schedule,
+    #     on_trace_ready=torch.profiler.tensorboard_trace_handler(log_dir),
+    #     record_shapes=True,
+    #     profile_memory=True,
+    #     with_stack=True
+    # )
     
-    profiler.start()
-    print("Profiler started")
-
-    with profiler:
+    # profiler.start()
+    # print("Profiler started")
+    forward_total_time = 0
+    # with profiler:
+    with torch.no_grad():
         for batch_idx, (images, targets, detections) in progress_bar:
             step_times = {}
             
             # Data transfer to GPU
-            with torch.profiler.record_function("Data Transfer"):
-                transfer_start_event = torch.cuda.Event(enable_timing=True)
-                transfer_end_event = torch.cuda.Event(enable_timing=True)
-                
-                transfer_start_event.record()
-                images = images.to(device)
-                targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
-                transfer_end_event.record()
-                
-                torch.cuda.synchronize()
-                step_times['data_transfer'] = transfer_start_event.elapsed_time(transfer_end_event) / 1000.0
+            # with torch.profiler.record_function("Data Transfer"):
+            # transfer_start_event = torch.cuda.Event(enable_timing=True)
+            # transfer_end_event = torch.cuda.Event(enable_timing=True)
+            
+            # transfer_start_event.record()
+            transfer_start_time = time.time()
+            images = images.to(device)
+            targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
+            transfer_end_time = time.time()
+            
+            # torch.cuda.synchronize()
+            step_times['data_transfer'] = transfer_end_time - transfer_start_time
             
             # Forward pass
-            with torch.profiler.record_function("Forward Pass"):
-                forward_start_event = torch.cuda.Event(enable_timing=True)
-                forward_end_event = torch.cuda.Event(enable_timing=True)
-                
-                forward_start_event.record()
-                optimizer.zero_grad()
-                tensors = images.tensors
-                out = backbone(tensors)
-                forward_end_event.record()
-                
-                torch.cuda.synchronize()
-                step_times['forward'] = forward_start_event.elapsed_time(forward_end_event) / 1000.0
+            # with torch.profiler.record_function("Forward Pass"):
+            # forward_start_event = torch.cuda.Event(enable_timing=True)
+            # forward_end_event = torch.cuda.Event(enable_timing=True)
+            
+            # forward_start_event.record()
+            
+            tensors = images.tensors
+            
+            forward_start_time = time.time()
+            out = backbone(tensors)
+            forward_end_time = time.time()
+            # forward_end_event.record()
+            step_times['forward'] = forward_end_time - forward_start_time
+            forward_total_time += step_times['forward']
+            # torch.cuda.synchronize()
+            # step_times['forward'] = forward_start_event.elapsed_time(forward_end_event) / 1000.0
             
             # 打印每个batch的时间
             print(f"Batch {batch_idx + 1}:")
@@ -161,16 +167,18 @@ def backbone_time(backbone, criterion, optimizer, data_loader, device, epoch, pr
                 
                 progress_bar.set_postfix(time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")
             
-            profiler.step()
-            print(f"Profiler step {batch_idx + 1} completed")
+            # profiler.step()
+            # print(f"Profiler step {batch_idx + 1} completed")
 
-    profiler.stop()
-    print("Profiler stopped")
-
+    # profiler.stop()
+    # print("Profiler stopped")
+    print("forward_total_time: ", forward_total_time)
+    forward_average_time = forward_total_time / 1000
+    print("forward_average_time: ", forward_average_time)
     elapsed_time = time.time() - start_time
     print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds.")
     
-    return
+    return forward_total_time
 
 def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
     model.train()

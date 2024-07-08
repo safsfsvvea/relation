@@ -670,29 +670,29 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
-            if args.output_dir and epoch % 10 == 0:
-                current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-                checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
-                checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'loss': train_loss,
-                }, filename=checkpoint_filename)
+            train_loss = backbone_time(backbone, criterion, optimizer, data_loader_train, device, epoch, tensorboard_writer=tensorboard_writer)
+        #     if args.output_dir and epoch % 10 == 0:
+        #         current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        #         checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
+        #         checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
+        #         save_checkpoint({
+        #             'epoch': epoch + 1,
+        #             'state_dict': model.state_dict(),
+        #             'optimizer': optimizer.state_dict(),
+        #             'loss': train_loss,
+        #         }, filename=checkpoint_filename)
                 
-                print(f"Checkpoint saved to {checkpoint_filename}")
-        checkpoint_filename = f"checkpoint.pth.tar"
-        checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
-        save_checkpoint({
-            'epoch': num_epochs,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'loss': train_loss,
-        }, filename=checkpoint_filename)
+        #         print(f"Checkpoint saved to {checkpoint_filename}")
+        # checkpoint_filename = f"checkpoint.pth.tar"
+        # checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
+        # save_checkpoint({
+        #     'epoch': num_epochs,
+        #     'state_dict': model.state_dict(),
+        #     'optimizer': optimizer.state_dict(),
+        #     'loss': train_loss,
+        # }, filename=checkpoint_filename)
         
-        print(f"Checkpoint saved to {checkpoint_filename}")
+        # print(f"Checkpoint saved to {checkpoint_filename}")
         
         elapsed_time = time.time() - start_time
         print(f"Training completed in {elapsed_time:.2f} seconds")
