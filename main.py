@@ -573,7 +573,7 @@ def main(args):
         # 打印优化器中mlp参数的总数
         mlp_params_count = sum(p.numel() for p in optimizer.param_groups[0]['params'])
         print("Total number of parameters in optimizer mlp:", mlp_params_count)
-    lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, threshold=0.0001, min_lr=1e-6)
+    lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, threshold=1e-5, min_lr=1e-6)
     
     postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, positive_negative=args.positive_negative, device=device)
     if args.pretrained:
@@ -734,7 +734,7 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=None, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
+            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
             state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
             if args.output_dir and epoch % 100 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
