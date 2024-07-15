@@ -12,7 +12,7 @@ from util.box_ops import box_cxcywh_to_xyxy
 from torchvision.ops import box_iou
 
 class HOIModel(nn.Module):
-    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1):
         super(HOIModel, self).__init__()
         self.backbone = backbone
         self.device = device
@@ -26,32 +26,36 @@ class HOIModel(nn.Module):
         self.num_category = 117 if not add_negative_category else 118
         self.topK = topK
         self.positive_negative = positive_negative
+        self.attention = BidirectionalCrossAttentionStack(embed_dim=feature_dim, num_heads=num_heads, num_layers=num_layers, dropout=dropout)
+        print("num_heads: ", num_heads)
+        print("num_layers: ", num_layers)
+        print("dropout: ", dropout)
         if not use_LN:
-        #     self.mlp = nn.Sequential(
-        #     nn.Linear(2 * feature_dim, 512),
-        #     nn.ReLU(),
-        #     nn.Linear(512, 256),
-        #     nn.ReLU(),
-        #     nn.Linear(256, 117)  
-        # )
             self.mlp = nn.Sequential(
-                nn.Linear(2 * feature_dim, 1024),
+                nn.Linear(feature_dim, 256),
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(1024, 512),
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(512, 256),
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(256, 128),
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(128, 64),
-                nn.ReLU(),
-                # nn.Dropout(p=0.5), 
-                nn.Linear(64, self.num_category)  
+                # nn.LayerNorm(256),  # 添加 Layer Normalization
+                nn.Dropout(dropout),  # 添加 Dropout
+                nn.Linear(256, self.num_category)
             )
+            # self.mlp = nn.Sequential(
+            #     nn.Linear(2 * feature_dim, 1024),
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(1024, 512),
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(512, 256),
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(256, 128),
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(128, 64),
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5), 
+            #     nn.Linear(64, self.num_category)  
+            # )
             if self.positive_negative:
                 self.positive_negative_mlp = nn.Sequential(
                     nn.Linear(2 * feature_dim, 1024),
@@ -98,28 +102,35 @@ class HOIModel(nn.Module):
                     nn.Linear(64, 2)  
                 )
             self.mlp = nn.Sequential(
-                nn.Linear(2 * feature_dim, 1024),
-                nn.LayerNorm(1024),  
+                nn.Linear(feature_dim, 256),
                 nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(1024, 512),
-                nn.LayerNorm(512),  
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(512, 256),
-                nn.LayerNorm(256),  
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(256, 128),
-                nn.LayerNorm(128),  
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(128, 64),
-                nn.LayerNorm(64),  
-                nn.ReLU(),
-                # nn.Dropout(p=0.5),  
-                nn.Linear(64, self.num_category)  
+                nn.LayerNorm(256),  # 添加 Layer Normalization
+                nn.Dropout(dropout),  # 添加 Dropout
+                nn.Linear(256, self.num_category)
             )
+            # self.mlp = nn.Sequential(
+            #     nn.Linear(2 * feature_dim, 1024),
+            #     nn.LayerNorm(1024),  
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(1024, 512),
+            #     nn.LayerNorm(512),  
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(512, 256),
+            #     nn.LayerNorm(256),  
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(256, 128),
+            #     nn.LayerNorm(128),  
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(128, 64),
+            #     nn.LayerNorm(64),  
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(64, self.num_category)  
+            # )
 
         self.to(self.device)
 
@@ -273,12 +284,13 @@ class HOIModel(nn.Module):
         batch_denoised_features, _, scales = self.backbone(images)
 
         batch_denoised_features = batch_denoised_features.permute(0, 3, 1, 2)
+        # print("batch_denoised_features before: ", batch_denoised_features.shape)
         # batch_denoised_features = F.interpolate(batch_denoised_features, scale_factor=2, mode='bilinear', align_corners=True)
-
+        # print("batch_denoised_features after: ", batch_denoised_features.shape)
         
         rois, additional_info, detection_counts= self.prepare_rois_cpu(detections_batch)
 
-        output_size = (1, 1)
+        output_size = (7, 7)
 
         pooled_features = roi_align(batch_denoised_features, rois, output_size)
 
@@ -286,6 +298,8 @@ class HOIModel(nn.Module):
 
         # 从 additional_info 中提取并区分 human 和 object 的 features
         all_pairs = []
+        query_list = []
+        key_list = []
         pair_start_indices = []
         hoi_results = []
         current_index = 0
@@ -294,10 +308,11 @@ class HOIModel(nn.Module):
             object_features = []
 
             for feat, det_info in zip(features, info):
+                # print("feat size: ", feat.shape)
                 if det_info['label'] == self.person_category_id:
-                    human_features.append((feat.view(-1), det_info['score'], det_info['label'], det_info['bbox']))
+                    human_features.append((feat.view(self.feature_dim, -1), det_info['score'], det_info['label'], det_info['bbox']))
                 else:
-                    object_features.append((feat.view(-1), det_info['score'], det_info['label'], det_info['bbox']))
+                    object_features.append((feat.view(self.feature_dim, -1), det_info['score'], det_info['label'], det_info['bbox']))
 
             # 排序并限制 human 和 object 的数量
             human_features.sort(key=lambda x: -x[1])
@@ -362,15 +377,20 @@ class HOIModel(nn.Module):
             #             'object_bbox': obj[3],
             #         })
             #         current_index += 1               
-             
+            
+            
             for human in human_features:
                 for obj in object_features:
-                    combined_feature = torch.cat([human[0], obj[0]], dim=0)
+                    # print("human[0].shape: ", human[0].shape)
+                    # print("obj[0].shape: ", obj[0].shape)
+                    query_list.append(human[0].unsqueeze(1))  # [768, 49] -> [768, 1, 49]
+                    key_list.append(obj[0].unsqueeze(1))
+                    # combined_feature = torch.cat([human[0], obj[0]], dim=0)
                     # human_feature = human[0]
                     # obj_feature = obj[0]
                     # cosine_similarity = F.cosine_similarity(human_feature.unsqueeze(0), obj_feature.unsqueeze(0))
                     # print("human object Cosine Similarity:", cosine_similarity.item())
-                    all_pairs.append(combined_feature.unsqueeze(0))
+                    # all_pairs.append(combined_feature.unsqueeze(0))
                     hoi_results.append({
                         'subject_category': human[2],
                         'subject_score': human[1],
@@ -383,15 +403,34 @@ class HOIModel(nn.Module):
                     })
                     current_index += 1
         # print("len(all_pairs): ", len(all_pairs))
-        if all_pairs:
-            all_pairs_tensor = torch.cat(all_pairs, dim=0)
-            if self.positive_negative:
-                positive_logits = self.positive_negative_mlp(all_pairs_tensor)
-                # positive_probs = F.softmax(positive_logits, dim=-1)  # 转换为概率分布
-                # positive_labels = (positive_probs[:, 1] > 0.5).squeeze().bool()  # 选择正类概率大于0.5的样本
-                for i, logit in enumerate(positive_logits):
-                    hoi_results[i]['binary_score'] = logit
-            relation_scores = self.mlp(all_pairs_tensor)
+        
+        
+        
+        if query_list:
+            query = torch.cat(query_list, dim=1)  # [768, 1, 49] -> [768, N, 49]
+            key = torch.cat(key_list, dim=1)      # [768, 1, 49] -> [768, N, 49]
+
+            # 将张量转换为 [49, N, 768] 的形状
+            query = query.permute(2, 1, 0)  # [768, N, 49] -> [49, N, 768]
+            key = key.permute(2, 1, 0)      # [768, N, 49] -> [49, N, 768]
+
+            # value 可以与 key 相同
+            value = key.clone()
+            # print("query.shape: ", query.shape)  # 输出: torch.Size([49, N, 768])
+            # print("key.shape: ", key.shape)      # 输出: torch.Size([49, N, 768])
+            # print("value.shape: ", value.shape)  # 输出: torch.Size([49, N, 768])
+            # all_pairs_tensor = torch.cat(all_pairs, dim=0)
+            # if self.positive_negative:
+            #     positive_logits = self.positive_negative_mlp(all_pairs_tensor)
+            #     # positive_probs = F.softmax(positive_logits, dim=-1)  # 转换为概率分布
+            #     # positive_labels = (positive_probs[:, 1] > 0.5).squeeze().bool()  # 选择正类概率大于0.5的样本
+            #     for i, logit in enumerate(positive_logits):
+            #         hoi_results[i]['binary_score'] = logit
+            query_out, key_out = self.attention(query, key ,value)
+            # print("attention_out.shape: ", attention_out.shape)
+            last_position_feature = query_out[-1, :, :]
+            relation_scores = self.mlp(last_position_feature)
+            # relation_scores = self.mlp(all_pairs_tensor)
             for i, score in enumerate(relation_scores):
                 hoi_results[i]['relation_score'] = score
             # positive_pairs = all_pairs_tensor[positive_labels]
@@ -426,8 +465,69 @@ class HOIModel(nn.Module):
                 image_hoi_results.append(hoi_results[start_idx:end_idx])
         return image_hoi_results 
     
+class MultiheadAttentionBlock(nn.Module):
+    def __init__(self, embed_dim, num_heads, dropout=0.1):
+        super(MultiheadAttentionBlock, self).__init__()
+        self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
 
+    def forward(self, query, key, value, attn_mask=None, key_padding_mask=None):
+        attn_output, _ = self.multihead_attn(query, key, value, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        query = query + self.dropout(attn_output)  # Add & Norm
+        query = self.norm1(query)
+        return query
 
+class BidirectionalCrossAttentionBlock(nn.Module):
+    def __init__(self, embed_dim, num_heads, dropout=0.1):
+        super(BidirectionalCrossAttentionBlock, self).__init__()
+        self.multihead_attn_qkv = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout)
+        self.multihead_attn_kvq = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, query, key, value, attn_mask=None, key_padding_mask=None):
+        # Cross Attention: query -> key, value
+        attn_output_qkv, _ = self.multihead_attn_qkv(query, key, value, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        query = query + self.dropout(attn_output_qkv)  # Add & Norm
+        query = self.norm1(query)
+
+        # Cross Attention: key, value -> query
+        attn_output_kvq, _ = self.multihead_attn_kvq(key, query, query, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        key = key + self.dropout(attn_output_kvq)  # Add & Norm
+        key = self.norm2(key)
+
+        return query, key
+    
+class MultiheadAttentionStack(nn.Module):
+    def __init__(self, embed_dim, num_heads, num_layers, dropout=0.1):
+        super(MultiheadAttentionStack, self).__init__()
+        self.layers = nn.ModuleList([
+            MultiheadAttentionBlock(embed_dim, num_heads, dropout)
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, query, key, value, attn_mask=None, key_padding_mask=None):
+        # 将输入依次通过每个 MultiheadAttentionBlock
+        for layer in self.layers:
+            query = layer(query, key, value, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        return query
+
+class BidirectionalCrossAttentionStack(nn.Module):
+    def __init__(self, embed_dim, num_heads, num_layers, dropout=0.1):
+        super(BidirectionalCrossAttentionStack, self).__init__()
+        self.layers = nn.ModuleList([
+            BidirectionalCrossAttentionBlock(embed_dim, num_heads, dropout)
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, query, key, value, attn_mask=None, key_padding_mask=None):
+        # 依次通过每个 BidirectionalCrossAttentionBlock
+        for layer in self.layers:
+            query, key = layer(query, key, value, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        return query, key
+   
 class PostProcessHOI(nn.Module):
     def __init__(self, relation_threshold=0.0, positive_negative=False, device='cuda'):
         super().__init__()
