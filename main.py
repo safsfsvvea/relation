@@ -26,6 +26,9 @@ import os
 from torch.utils.data import Subset
 from sklearn.model_selection import KFold
 import copy
+from transformers import get_linear_schedule_with_warmup
+from torch.optim.lr_scheduler import MultiStepLR
+
 # from ultralytics import YOLO
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
@@ -33,7 +36,7 @@ def get_args_parser():
     parser.add_argument('--lr_detector', default=1e-5, type=float)
     parser.add_argument('--lr_backbone', default=0, type=float) #1e-5
     parser.add_argument('--text_encoder_lr', default=5e-5, type=float)
-    parser.add_argument('--batch_size', default=2, type=int)
+    parser.add_argument('--batch_size', default=4, type=int)
     parser.add_argument('--accumulation_steps', default=32, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=150, type=int)
@@ -76,6 +79,8 @@ def get_args_parser():
     parser.add_argument('--load_backbone', default='supervised', type=str, choices=['swav', 'supervised'])
 
     # * Transformer
+    parser.add_argument('--attention_layers', default=1, type=int,
+                        help="Number of attention layers")
     parser.add_argument('--enc_layers', default=6, type=int,
                         help="Number of encoding layers in the transformer")
     parser.add_argument('--dec_layers', default=6, type=int,
@@ -85,7 +90,7 @@ def get_args_parser():
     parser.add_argument('--hidden_dim', default=256, type=int,
                         help="Size of the embeddings (dimension of the transformer)")
     parser.add_argument('--dropout', default=0.1, type=float,
-                        help="Dropout applied in the transformer")
+                        help="Dropout applied in the transformer and mlp")
     parser.add_argument('--nheads', default=8, type=int,
                         help="Number of attention heads inside the transformer's attentions")
     parser.add_argument('--num_queries', default=100, type=int,
@@ -529,7 +534,7 @@ def main(args):
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative)
+    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
     matcher = HungarianMatcherHOI_det(
         device=device,
         cost_obj_class=args.set_cost_obj_class,
@@ -573,7 +578,8 @@ def main(args):
         # 打印优化器中mlp参数的总数
         mlp_params_count = sum(p.numel() for p in optimizer.param_groups[0]['params'])
         print("Total number of parameters in optimizer mlp:", mlp_params_count)
-    lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, threshold=1e-5, min_lr=1e-6)
+    # if args.schedule is None:
+    #     lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, threshold=1e-5, min_lr=1e-6)
     
     postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, positive_negative=args.positive_negative, device=device)
     if args.pretrained:
@@ -728,13 +734,24 @@ def main(args):
         
         tensorboard_writer = SummaryWriter(log_dir=args.log_dir)
         num_epochs = args.epochs
+        lr_scheduler =None
+        if args.schedule == "linear_with_warmup":
+            # 计算总的训练步骤数
+            total_steps = len(data_loader_train) * num_epochs // args.accumulation_steps
+            warmup_steps = total_steps // 10  # 例如，使用总步骤数的10%作为warmup
+            lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+        elif args.schedule == "multistep":
+            milestones = [int(0.2 * num_epochs), int(0.4 * num_epochs), int(0.6 * num_epochs)]
+            gamma = 0.1
+            lr_scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+        
         best_loss = float('inf')
         best_epoch = -1
         best_map = 0
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, tensorboard_writer=tensorboard_writer)
+            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
             state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
             if args.output_dir and epoch % 100 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')

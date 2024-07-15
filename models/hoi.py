@@ -26,7 +26,10 @@ class HOIModel(nn.Module):
         self.num_category = 117 if not add_negative_category else 118
         self.topK = topK
         self.positive_negative = positive_negative
-        self.attention = MultiheadAttentionStack(embed_dim=feature_dim, num_heads=num_heads, num_layers=num_layers, dropout=dropout)
+        self.attention = BidirectionalCrossAttentionStack(embed_dim=feature_dim, num_heads=num_heads, num_layers=num_layers, dropout=dropout)
+        print("num_heads: ", num_heads)
+        print("num_layers: ", num_layers)
+        print("dropout: ", dropout)
         if not use_LN:
             self.mlp = nn.Sequential(
                 nn.Linear(feature_dim, 256),
@@ -423,9 +426,9 @@ class HOIModel(nn.Module):
             #     # positive_labels = (positive_probs[:, 1] > 0.5).squeeze().bool()  # 选择正类概率大于0.5的样本
             #     for i, logit in enumerate(positive_logits):
             #         hoi_results[i]['binary_score'] = logit
-            attention_out = self.attention(query, key ,value)
+            query_out, key_out = self.attention(query, key ,value)
             # print("attention_out.shape: ", attention_out.shape)
-            last_position_feature = attention_out[-1, :, :]
+            last_position_feature = query_out[-1, :, :]
             relation_scores = self.mlp(last_position_feature)
             # relation_scores = self.mlp(all_pairs_tensor)
             for i, score in enumerate(relation_scores):
@@ -475,6 +478,28 @@ class MultiheadAttentionBlock(nn.Module):
         query = self.norm1(query)
         return query
 
+class BidirectionalCrossAttentionBlock(nn.Module):
+    def __init__(self, embed_dim, num_heads, dropout=0.1):
+        super(BidirectionalCrossAttentionBlock, self).__init__()
+        self.multihead_attn_qkv = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout)
+        self.multihead_attn_kvq = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, query, key, value, attn_mask=None, key_padding_mask=None):
+        # Cross Attention: query -> key, value
+        attn_output_qkv, _ = self.multihead_attn_qkv(query, key, value, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        query = query + self.dropout(attn_output_qkv)  # Add & Norm
+        query = self.norm1(query)
+
+        # Cross Attention: key, value -> query
+        attn_output_kvq, _ = self.multihead_attn_kvq(key, query, query, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        key = key + self.dropout(attn_output_kvq)  # Add & Norm
+        key = self.norm2(key)
+
+        return query, key
+    
 class MultiheadAttentionStack(nn.Module):
     def __init__(self, embed_dim, num_heads, num_layers, dropout=0.1):
         super(MultiheadAttentionStack, self).__init__()
@@ -488,7 +513,21 @@ class MultiheadAttentionStack(nn.Module):
         for layer in self.layers:
             query = layer(query, key, value, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
         return query
-    
+
+class BidirectionalCrossAttentionStack(nn.Module):
+    def __init__(self, embed_dim, num_heads, num_layers, dropout=0.1):
+        super(BidirectionalCrossAttentionStack, self).__init__()
+        self.layers = nn.ModuleList([
+            BidirectionalCrossAttentionBlock(embed_dim, num_heads, dropout)
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, query, key, value, attn_mask=None, key_padding_mask=None):
+        # 依次通过每个 BidirectionalCrossAttentionBlock
+        for layer in self.layers:
+            query, key = layer(query, key, value, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        return query, key
+   
 class PostProcessHOI(nn.Module):
     def __init__(self, relation_threshold=0.0, positive_negative=False, device='cuda'):
         super().__init__()

@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 import torch.profiler
 from torch.cuda.amp import GradScaler, autocast  # 添加混合精度相关库
+from torch.nn.utils import clip_grad_norm_
 def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
     model.train()
     start_time = time.time()
@@ -232,7 +233,7 @@ def train_one_epoch_with_time(model, criterion, optimizer, data_loader, device, 
     
     return epoch_loss / num_batches
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_scheduler=None, print_freq=100, accumulation_steps=32, tensorboard_writer=None):
+def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_scheduler=None, print_freq=100, accumulation_steps=32, grad_clip_val=1.0, tensorboard_writer=None, args=None):
     # TODO: 优化成RLIP的样子
     model.train()
     # detector.model.train()
@@ -290,9 +291,17 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
                 has_non_zero_loss = True  # 设置标志位
                 
                 if (batch_idx + 1) % accumulation_steps == 0:
+                    scaler.unscale_(optimizer)  # 取消缩放
+                    total_norm = clip_grad_norm_(model.parameters(), grad_clip_val)  # 计算梯度模并进行裁剪
+                    
                     scaler.step(optimizer)  # 使用 GradScaler 进行优化步骤
                     scaler.update()
                     optimizer.zero_grad()  # 清空梯度
+                    if tensorboard_writer is not None:
+                        global_step = epoch * num_batches + batch_idx
+                        tensorboard_writer.add_scalar('grad_norm', total_norm, global_step)  # 将梯度模写入TensorBoard
+                    if args.schedule == "linear_with_warmup":
+                        lr_scheduler.step()
         else:
             relation_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
             binary_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
@@ -337,12 +346,21 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
             tensorboard_writer.add_scalar('train_relation_loss', relation_loss.item(), global_step=global_step)  # 修改，记录多分类损失到Tensorboard
 
     if (batch_idx + 1) % accumulation_steps != 0 and has_non_zero_loss:
+        scaler.unscale_(optimizer)  # 取消缩放
+        total_norm = clip_grad_norm_(model.parameters(), grad_clip_val)  # 计算梯度模并进行裁剪
+
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad()
-    
-    if lr_scheduler is not None:
-        lr_scheduler.step(epoch_loss  / num_batches)  # 根据当前 epoch 的平均损失更新学习率
+        if tensorboard_writer is not None:
+            global_step = epoch * num_batches + batch_idx
+            tensorboard_writer.add_scalar('grad_norm', total_norm, global_step)  # 将梯度模写入TensorBoard
+        if args.schedule == "linear_with_warmup":
+            lr_scheduler.step()
+    if args.schedule == "multistep":
+        lr_scheduler.step()
+    # if lr_scheduler is not None:
+    #     lr_scheduler.step(epoch_loss  / num_batches)  # 根据当前 epoch 的平均损失更新学习率
     # 打印训练总时间
     elapsed_time = time.time() - start_time
     print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss  / num_batches:.4f}. Average relation loss: {epoch_relation_loss  / num_batches:.4f}. Average binary loss: {epoch_binary_loss  / num_batches:.4f}")
