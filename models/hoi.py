@@ -451,7 +451,7 @@ class HOIModel(nn.Module):
             hoi_results[i]['relation_score'] = score
         # Organize results per image
         image_hoi_results  = []
-        assert len(pair_start_indices) == batch_size, "len(pair_start_indices) != batch_size"
+        # assert len(pair_start_indices) == batch_size, "len(pair_start_indices) != batch_size"
         for i in range(len(pair_start_indices)):
             start_idx = pair_start_indices[i]
             end_idx = pair_start_indices[i+1] if i+1 < len(pair_start_indices) else len(relation_scores)
@@ -464,6 +464,137 @@ class HOIModel(nn.Module):
             else:
                 image_hoi_results.append(hoi_results[start_idx:end_idx])
         return image_hoi_results 
+
+class backbone_time(nn.Module):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1):
+        super(backbone_time, self).__init__()
+        self.backbone = backbone
+        self.device = device
+        self.num_objects = num_objects
+        self.feature_dim = feature_dim
+        self.person_category_id = person_category_id
+        self.patch_size = patch_size
+        self.no_pairs_count = 0  # 用于统计 "No pairs found for this batch." 的计数
+        self.no_results_count = 0  # 用于统计 "No results found for this image." 的计数
+        self.iou_threshold = iou_threshold
+        self.num_category = 117 if not add_negative_category else 118
+        self.topK = topK
+        self.positive_negative = positive_negative
+        self.attention = BidirectionalCrossAttentionStack(embed_dim=feature_dim, num_heads=num_heads, num_layers=num_layers, dropout=dropout)
+        print("num_heads: ", num_heads)
+        print("num_layers: ", num_layers)
+        print("dropout: ", dropout)
+        if not use_LN:
+            self.mlp = nn.Sequential(
+                nn.Linear(feature_dim, 256),
+                nn.ReLU(),
+                # nn.LayerNorm(256),  # 添加 Layer Normalization
+                nn.Dropout(dropout),  # 添加 Dropout
+                nn.Linear(256, self.num_category)
+            )
+            # self.mlp = nn.Sequential(
+            #     nn.Linear(2 * feature_dim, 1024),
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(1024, 512),
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(512, 256),
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(256, 128),
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(128, 64),
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5), 
+            #     nn.Linear(64, self.num_category)  
+            # )
+            if self.positive_negative:
+                self.positive_negative_mlp = nn.Sequential(
+                    nn.Linear(2 * feature_dim, 1024),
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(1024, 512),
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(512, 256),
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(256, 128),
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(128, 64),
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5), 
+                    nn.Linear(64, 2)  
+                )
+        else:
+            print("use LN")
+            if self.positive_negative:
+                self.positive_negative_mlp = nn.Sequential(
+                    nn.Linear(2 * feature_dim, 1024),
+                    nn.LayerNorm(1024),  
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(1024, 512),
+                    nn.LayerNorm(512),  
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(512, 256),
+                    nn.LayerNorm(256),  
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(256, 128),
+                    nn.LayerNorm(128),  
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(128, 64),
+                    nn.LayerNorm(64),  
+                    nn.ReLU(),
+                    # nn.Dropout(p=0.5),  
+                    nn.Linear(64, 2)  
+                )
+            self.mlp = nn.Sequential(
+                nn.Linear(feature_dim, 256),
+                nn.ReLU(),
+                nn.LayerNorm(256),  # 添加 Layer Normalization
+                nn.Dropout(dropout),  # 添加 Dropout
+                nn.Linear(256, self.num_category)
+            )
+            # self.mlp = nn.Sequential(
+            #     nn.Linear(2 * feature_dim, 1024),
+            #     nn.LayerNorm(1024),  
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(1024, 512),
+            #     nn.LayerNorm(512),  
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(512, 256),
+            #     nn.LayerNorm(256),  
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(256, 128),
+            #     nn.LayerNorm(128),  
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(128, 64),
+            #     nn.LayerNorm(64),  
+            #     nn.ReLU(),
+            #     # nn.Dropout(p=0.5),  
+            #     nn.Linear(64, self.num_category)  
+            # )
+
+        self.to(self.device)
+    
+    def forward(self, nested_tensor: NestedTensor, rois_tensor, additional_info, detection_counts):
+        images = nested_tensor.tensors
+        # print("image size", images.size())
+        mask = nested_tensor.mask
+        batch_size = images.size(0)
+        batch_denoised_features, _, scales = self.backbone(images)
+        return batch_denoised_features
     
 class MultiheadAttentionBlock(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout=0.1):
@@ -684,42 +815,42 @@ class CriterionHOI(nn.Module):
                     matched_tgt_verb_labels.append(torch.cat([tgt['verb_labels'][obj_idx], torch.tensor([0.0], device=self.device)], dim=0).unsqueeze(0))
                 else:
                     matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx].unsqueeze(0))
-                pred_subject = pred[sub_idx]
+                # pred_subject = pred[sub_idx]
 
-                tgt_subject = tgt['sub_labels'][obj_idx]
-                tgt_object = tgt['obj_labels'][obj_idx]
-                H, W = tgt['size']
-                tgt_sub_boxes = box_cxcywh_to_xyxy(tgt['sub_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
-                tgt_obj_boxes = box_cxcywh_to_xyxy(tgt['obj_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
-                self.total_pairs += 1
-                try:
-                    assert pred_subject['subject_category'] - 1 == tgt_subject.item(), f"Subject labels do not match: pred {pred_subject['subject_category']-1}, tgt {tgt_subject.item()}"
-                except AssertionError as e:
-                    print(f"AssertionError: {e}")
-                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
-                    print(tgt['filename'])
-                    self.subject_label_mismatch += 1
-                try:
-                    assert pred_subject['object_category'] - 1 == tgt_object.item(), f"Object labels do not match: pred {pred_subject['object_category']}, tgt {tgt_object.item()}"
-                except AssertionError as e:
-                    print(f"AssertionError: {e}")
-                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
-                    print(tgt['filename'])
-                    self.object_label_mismatch += 1
-                try:
-                    assert torch.allclose(torch.tensor(pred_subject['subject_bbox'], device=self.device), tgt_sub_boxes), f"Subject boxes do not match: pred {pred_subject['subject_bbox']}, tgt {tgt_sub_boxes}"
-                except AssertionError as e:
-                    print(f"AssertionError: {e}")
-                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
-                    print(tgt['filename'])
-                    self.subject_box_mismatch += 1
-                try:
-                    assert torch.allclose(torch.tensor(pred_subject['object_bbox'], device=self.device), tgt_obj_boxes), f"Object boxes do not match: pred {pred_subject['object_bbox']}, tgt {tgt_obj_boxes}"
-                except AssertionError as e:
-                    print(f"AssertionError: {e}")
-                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
-                    print(tgt['filename'])
-                    self.object_box_mismatch += 1
+                # tgt_subject = tgt['sub_labels'][obj_idx]
+                # tgt_object = tgt['obj_labels'][obj_idx]
+                # H, W = tgt['size']
+                # tgt_sub_boxes = box_cxcywh_to_xyxy(tgt['sub_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
+                # tgt_obj_boxes = box_cxcywh_to_xyxy(tgt['obj_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
+                # self.total_pairs += 1
+                # try:
+                #     assert pred_subject['subject_category'] - 1 == tgt_subject.item(), f"Subject labels do not match: pred {pred_subject['subject_category']-1}, tgt {tgt_subject.item()}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.subject_label_mismatch += 1
+                # try:
+                #     assert pred_subject['object_category'] - 1 == tgt_object.item(), f"Object labels do not match: pred {pred_subject['object_category']}, tgt {tgt_object.item()}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.object_label_mismatch += 1
+                # try:
+                #     assert torch.allclose(torch.tensor(pred_subject['subject_bbox'], device=self.device), tgt_sub_boxes), f"Subject boxes do not match: pred {pred_subject['subject_bbox']}, tgt {tgt_sub_boxes}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.subject_box_mismatch += 1
+                # try:
+                #     assert torch.allclose(torch.tensor(pred_subject['object_bbox'], device=self.device), tgt_obj_boxes), f"Object boxes do not match: pred {pred_subject['object_bbox']}, tgt {tgt_obj_boxes}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.object_box_mismatch += 1
             if self.add_negative_category:
                 unmatched_pred_verb_scores = []
                 for i in range(len(pred)):

@@ -1,8 +1,8 @@
 from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
-from models.hoi import HOIModel, CriterionHOI, PostProcessHOI
+from models.hoi import HOIModel, CriterionHOI, PostProcessHOI, backbone_time
 from models.matcher import HungarianMatcherHOI_det
-from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time
+from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time, train_backbone_time
 import datasets
 from datasets.hico import CustomSubset
 import util.misc as utils
@@ -535,7 +535,8 @@ def main(args):
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
+    # model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
+    model = backbone_time(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
     matcher = HungarianMatcherHOI_det(
         device=device,
         cost_obj_class=args.set_cost_obj_class,
@@ -752,69 +753,69 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
-            state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
-            if args.output_dir and epoch % 100 == 0:
-                current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-                checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
-                checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'state_dict': state_dict_to_save,
-                    'optimizer': optimizer.state_dict(),
-                    'loss': train_loss,
-                }, filename=checkpoint_filename)
+            train_loss, relation_loss, binary_loss = train_backbone_time(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
+            # state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
+            # if args.output_dir and epoch % 100 == 0:
+            #     current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            #     checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
+            #     checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
+            #     save_checkpoint({
+            #         'epoch': epoch + 1,
+            #         'state_dict': state_dict_to_save,
+            #         'optimizer': optimizer.state_dict(),
+            #         'loss': train_loss,
+            #     }, filename=checkpoint_filename)
                 
-                print(f"Checkpoint saved to {checkpoint_filename}")
-            if train_loss < best_loss:
-                best_loss = train_loss
-                best_epoch = epoch
+            #     print(f"Checkpoint saved to {checkpoint_filename}")
+            # if train_loss < best_loss:
+            #     best_loss = train_loss
+            #     best_epoch = epoch
                 
-                # 保存最小损失模型
-                best_model_filename = os.path.join(args.output_dir, "best_model.pth.tar")
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'state_dict': state_dict_to_save,
-                    'optimizer': optimizer.state_dict(),
-                    'loss': train_loss,
-                }, filename=best_model_filename)
+            #     # 保存最小损失模型
+            #     best_model_filename = os.path.join(args.output_dir, "best_model.pth.tar")
+            #     save_checkpoint({
+            #         'epoch': epoch + 1,
+            #         'state_dict': state_dict_to_save,
+            #         'optimizer': optimizer.state_dict(),
+            #         'loss': train_loss,
+            #     }, filename=best_model_filename)
                 
-                print(f"Best model saved to {best_model_filename} at epoch {epoch}")
-            if epoch % 5 == 0 or epoch == num_epochs - 1:
-                # train_state_dict = copy.deepcopy(model.state_dict())
-                test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
-                # test_state_dict = copy.deepcopy(model.state_dict())
-                # assert torch.equal(train_input[0][0].tensors, test_input[0][0].tensors), "Train and test images are different"
-                # assert torch.equal(train_input[0][0].mask, test_input[0][0].mask), "Train and test masks are different"
-                # print("train target: ", train_input[0][1])
-                # print("test target: ", test_input[0][1])
-                # print("train detection: ", train_input[0][2])
-                # print("test detection: ", test_input[0][2])
-                # for key in train_state_dict:
-                #     assert torch.equal(train_state_dict[key], test_state_dict[key]), f"Train and test model parameters are different for key: {key}"
-                tensorboard_writer.add_scalar('Test/mAP', test_stats['mAP'], epoch)
+            #     print(f"Best model saved to {best_model_filename} at epoch {epoch}")
+            # if epoch % 5 == 0 or epoch == num_epochs - 1:
+            #     # train_state_dict = copy.deepcopy(model.state_dict())
+            #     test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
+            #     # test_state_dict = copy.deepcopy(model.state_dict())
+            #     # assert torch.equal(train_input[0][0].tensors, test_input[0][0].tensors), "Train and test images are different"
+            #     # assert torch.equal(train_input[0][0].mask, test_input[0][0].mask), "Train and test masks are different"
+            #     # print("train target: ", train_input[0][1])
+            #     # print("test target: ", test_input[0][1])
+            #     # print("train detection: ", train_input[0][2])
+            #     # print("test detection: ", test_input[0][2])
+            #     # for key in train_state_dict:
+            #     #     assert torch.equal(train_state_dict[key], test_state_dict[key]), f"Train and test model parameters are different for key: {key}"
+            #     tensorboard_writer.add_scalar('Test/mAP', test_stats['mAP'], epoch)
                 
-                if test_stats['mAP'] > best_map:
-                    best_map = test_stats['mAP']
-                    best_map_model_filename = os.path.join(args.output_dir, "best_map_model.pth.tar")
-                    save_checkpoint({
-                        'epoch': epoch + 1,
-                        'state_dict': state_dict_to_save,
-                        'optimizer': optimizer.state_dict(),
-                        'loss': train_loss,
-                        'mAP': test_stats['mAP'],
-                    }, filename=best_map_model_filename)
-                    print(f"Best mAP model saved to {best_map_model_filename} with mAP {best_map} at epoch {epoch}")
-            checkpoint_filename = f"checkpoint.pth.tar"
-            checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
-            save_checkpoint({
-                'epoch': num_epochs,
-                'state_dict': state_dict_to_save,
-                'optimizer': optimizer.state_dict(),
-                'loss': train_loss,
-            }, filename=checkpoint_filename)
+            #     if test_stats['mAP'] > best_map:
+            #         best_map = test_stats['mAP']
+            #         best_map_model_filename = os.path.join(args.output_dir, "best_map_model.pth.tar")
+            #         save_checkpoint({
+            #             'epoch': epoch + 1,
+            #             'state_dict': state_dict_to_save,
+            #             'optimizer': optimizer.state_dict(),
+            #             'loss': train_loss,
+            #             'mAP': test_stats['mAP'],
+            #         }, filename=best_map_model_filename)
+            #         print(f"Best mAP model saved to {best_map_model_filename} with mAP {best_map} at epoch {epoch}")
+            # checkpoint_filename = f"checkpoint.pth.tar"
+            # checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
+            # save_checkpoint({
+            #     'epoch': num_epochs,
+            #     'state_dict': state_dict_to_save,
+            #     'optimizer': optimizer.state_dict(),
+            #     'loss': train_loss,
+            # }, filename=checkpoint_filename)
             
-            print(f"Checkpoint saved to {checkpoint_filename}")
+            # print(f"Checkpoint saved to {checkpoint_filename}")
         
         elapsed_time = time.time() - start_time
         print(f"Training completed in {elapsed_time:.2f} seconds")
