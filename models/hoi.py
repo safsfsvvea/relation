@@ -451,7 +451,7 @@ class HOIModel(nn.Module):
             hoi_results[i]['relation_score'] = score
         # Organize results per image
         image_hoi_results  = []
-        assert len(pair_start_indices) == batch_size, "len(pair_start_indices) != batch_size"
+        # assert len(pair_start_indices) == batch_size, "len(pair_start_indices) != batch_size"
         for i in range(len(pair_start_indices)):
             start_idx = pair_start_indices[i]
             end_idx = pair_start_indices[i+1] if i+1 < len(pair_start_indices) else len(relation_scores)
@@ -684,42 +684,44 @@ class CriterionHOI(nn.Module):
                     matched_tgt_verb_labels.append(torch.cat([tgt['verb_labels'][obj_idx], torch.tensor([0.0], device=self.device)], dim=0).unsqueeze(0))
                 else:
                     matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx].unsqueeze(0))
-                pred_subject = pred[sub_idx]
+                    
+                # pred_subject = pred[sub_idx]
 
-                tgt_subject = tgt['sub_labels'][obj_idx]
-                tgt_object = tgt['obj_labels'][obj_idx]
-                H, W = tgt['size']
-                tgt_sub_boxes = box_cxcywh_to_xyxy(tgt['sub_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
-                tgt_obj_boxes = box_cxcywh_to_xyxy(tgt['obj_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
-                self.total_pairs += 1
-                try:
-                    assert pred_subject['subject_category'] - 1 == tgt_subject.item(), f"Subject labels do not match: pred {pred_subject['subject_category']-1}, tgt {tgt_subject.item()}"
-                except AssertionError as e:
-                    print(f"AssertionError: {e}")
-                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
-                    print(tgt['filename'])
-                    self.subject_label_mismatch += 1
-                try:
-                    assert pred_subject['object_category'] - 1 == tgt_object.item(), f"Object labels do not match: pred {pred_subject['object_category']}, tgt {tgt_object.item()}"
-                except AssertionError as e:
-                    print(f"AssertionError: {e}")
-                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
-                    print(tgt['filename'])
-                    self.object_label_mismatch += 1
-                try:
-                    assert torch.allclose(torch.tensor(pred_subject['subject_bbox'], device=self.device), tgt_sub_boxes), f"Subject boxes do not match: pred {pred_subject['subject_bbox']}, tgt {tgt_sub_boxes}"
-                except AssertionError as e:
-                    print(f"AssertionError: {e}")
-                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
-                    print(tgt['filename'])
-                    self.subject_box_mismatch += 1
-                try:
-                    assert torch.allclose(torch.tensor(pred_subject['object_bbox'], device=self.device), tgt_obj_boxes), f"Object boxes do not match: pred {pred_subject['object_bbox']}, tgt {tgt_obj_boxes}"
-                except AssertionError as e:
-                    print(f"AssertionError: {e}")
-                    print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
-                    print(tgt['filename'])
-                    self.object_box_mismatch += 1
+                # tgt_subject = tgt['sub_labels'][obj_idx]
+                # tgt_object = tgt['obj_labels'][obj_idx]
+                # H, W = tgt['size']
+                # tgt_sub_boxes = box_cxcywh_to_xyxy(tgt['sub_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
+                # tgt_obj_boxes = box_cxcywh_to_xyxy(tgt['obj_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
+                # self.total_pairs += 1
+                # try:
+                #     assert pred_subject['subject_category'] - 1 == tgt_subject.item(), f"Subject labels do not match: pred {pred_subject['subject_category']-1}, tgt {tgt_subject.item()}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.subject_label_mismatch += 1
+                # try:
+                #     assert pred_subject['object_category'] - 1 == tgt_object.item(), f"Object labels do not match: pred {pred_subject['object_category']}, tgt {tgt_object.item()}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.object_label_mismatch += 1
+                # try:
+                #     assert torch.allclose(torch.tensor(pred_subject['subject_bbox'], device=self.device), tgt_sub_boxes), f"Subject boxes do not match: pred {pred_subject['subject_bbox']}, tgt {tgt_sub_boxes}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.subject_box_mismatch += 1
+                # try:
+                #     assert torch.allclose(torch.tensor(pred_subject['object_bbox'], device=self.device), tgt_obj_boxes), f"Object boxes do not match: pred {pred_subject['object_bbox']}, tgt {tgt_obj_boxes}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.object_box_mismatch += 1
+                    
             if self.add_negative_category:
                 unmatched_pred_verb_scores = []
                 for i in range(len(pred)):
