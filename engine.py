@@ -261,11 +261,11 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
 
     # debug
     # input = []
-    
-    for batch_idx, (images, targets, rois_tensor, additional_info, detection_counts) in progress_bar:
-        print("rois_tensor: ", rois_tensor)
-        print("additional_info: ", additional_info)
-        print("detection_counts: ", detection_counts)
+    forward_total_time = 0
+    for batch_idx, (images, targets, rois_tensor, additional_info, detection_counts, _) in progress_bar:
+        # print("rois_tensor: ", rois_tensor)
+        # print("additional_info: ", additional_info)
+        # print("detection_counts: ", detection_counts)
         images = images.to(device)
         # print("images.shape: ", images.shape)
         # input.append((images, targets, detections))
@@ -274,7 +274,10 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         # print("filename: ", targets[0]['filename'])
         
         with autocast():  # 使用 autocast 进行混合精度前向传播
+            forward_start_time = time.time()
             out = model(images, rois_tensor, additional_info, detection_counts)
+            forward_time = time.time() - forward_start_time
+            forward_total_time += forward_time
             # print("out: ", out)
             # for image_results in out:
             #     for hoi in image_results:
@@ -367,7 +370,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     # 打印训练总时间
     elapsed_time = time.time() - start_time
     print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss  / num_batches:.4f}. Average relation loss: {epoch_relation_loss  / num_batches:.4f}. Average binary loss: {epoch_binary_loss  / num_batches:.4f}")
-    
+    print("forward_total_time: ", forward_total_time)
     no_pairs_ratio = no_pairs_batches / num_batches
     no_results_ratio = no_results_images / total_images
     
@@ -412,7 +415,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     # input = []
     
     with torch.no_grad():
-        for samples, targets, detections in metric_logger.log_every(data_loader, print_freq, header):
+        for samples, targets, rois_tensor, additional_info, detection_counts, detections in metric_logger.log_every(data_loader, print_freq, header):
             # targets: tuple, len(tuple) = batch_size
             #          element in tuple: a dict, whose keys are ['orig_size', 'size', 'boxes', 'labels', 'id', 'hois']
                     
@@ -423,7 +426,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
 
             # input.append((samples, targets, detections))
             
-            outputs = model(samples, detections)
+            outputs = model(samples, rois_tensor, additional_info, detection_counts)
             # print("outputs: ", outputs)
             # loss = criterion(outputs, targets)
             # print("loss: ", loss)

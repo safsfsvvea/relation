@@ -767,7 +767,7 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         # print("target['labels']: ", target['labels'])
         # print("target['labels'] shape: ", target['labels'].shape)
         rois_tensor, additional_info, detection_counts = self.prepare_rois(target1)
-        return img, target, rois_tensor, additional_info, detection_counts # target1
+        return img, target, rois_tensor, additional_info, detection_counts, target1
     
     def prepare_rois(self, detection):
         scale_factor = 14  # Assuming patch_size = 14
