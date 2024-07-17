@@ -766,8 +766,39 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         # print("target1['labels'] shape: ", target1['labels'].shape)
         # print("target['labels']: ", target['labels'])
         # print("target['labels'] shape: ", target['labels'].shape)
-        return img, target, target1 # detection
+        rois_tensor, additional_info, detection_counts = self.prepare_rois(target1)
+        return img, target, rois_tensor, additional_info, detection_counts # target1
+    
+    def prepare_rois(self, detection):
+        scale_factor = 14  # Assuming patch_size = 14
 
+        H, W = detection['size']
+        if not detection['boxes'].nelement():
+            return torch.empty((0, 4)), [], 0
+
+        boxes = detection['boxes']
+        labels = detection['labels']
+        scores = detection['scores']
+
+        cx, cy, bw, bh = boxes.T
+        xmin = (cx - bw / 2) * W
+        ymin = (cy - bh / 2) * H
+        xmax = (cx + bw / 2) * W
+        ymax = (cy + bh / 2) * H
+
+        scaled_xmin = xmin / scale_factor
+        scaled_ymin = ymin / scale_factor
+        scaled_xmax = xmax / scale_factor
+        scaled_ymax = ymax / scale_factor
+
+        rois = torch.stack([scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
+
+        additional_info = [{'label': label.item(), 'bbox': [roi[0].item() * scale_factor, roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor], 'score': score.item()}
+                           for label, roi, score in zip(labels, rois, scores)]
+
+        detection_counts = len(boxes)
+        return rois.float(), additional_info, detection_counts
+    
     def set_rare_hois(self, anno_file):
         with open(anno_file, 'r') as f:
             annotations = json.load(f)

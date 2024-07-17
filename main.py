@@ -523,6 +523,7 @@ def ensure_dir(directory):
 
 def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    args.device = device
     train_backbone = False
     if args.lr_backbone > 0:
         train_backbone = True

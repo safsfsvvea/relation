@@ -262,16 +262,19 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     # debug
     # input = []
     
-    for batch_idx, (images, targets, detections) in progress_bar:
-
+    for batch_idx, (images, targets, rois_tensor, additional_info, detection_counts) in progress_bar:
+        print("rois_tensor: ", rois_tensor)
+        print("additional_info: ", additional_info)
+        print("detection_counts: ", detection_counts)
         images = images.to(device)
+        # print("images.shape: ", images.shape)
         # input.append((images, targets, detections))
         # targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
         targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
         # print("filename: ", targets[0]['filename'])
         
         with autocast():  # 使用 autocast 进行混合精度前向传播
-            out = model(images, detections)
+            out = model(images, rois_tensor, additional_info, detection_counts)
             # print("out: ", out)
             # for image_results in out:
             #     for hoi in image_results:

@@ -259,23 +259,23 @@ class HOIModel(nn.Module):
                         for label, roi, idx, score in zip(labels_tensor, rois_tensor, image_indices_tensor, scores_tensor)]
 
         return rois_tensor.float(), additional_info, detection_counts
-    def separate_pooled_features(self, pooled_features, additional_info, detection_counts):
+    def separate_pooled_features(self, pooled_features, detection_counts):
         separated_features = []
-        separated_additional_info = []
+        # separated_additional_info = []
         current_idx = 0
 
         for count in detection_counts:
             if count > 0:
                 separated_features.append(pooled_features[current_idx:current_idx + count])
-                separated_additional_info.append(additional_info[current_idx:current_idx + count])
+                # separated_additional_info.append(additional_info[current_idx:current_idx + count])
             else:
                 separated_features.append(torch.empty(0, pooled_features.size(1), pooled_features.size(2), pooled_features.size(3)))
-                separated_additional_info.append([])
+                # separated_additional_info.append([])
             current_idx += count
 
-        return separated_features, separated_additional_info
+        return separated_features
     
-    def forward(self, nested_tensor: NestedTensor, detections_batch):
+    def forward(self, nested_tensor: NestedTensor, rois_tensor, additional_info, detection_counts):
         images = nested_tensor.tensors
         # print("image size", images.size())
         mask = nested_tensor.mask
@@ -288,13 +288,13 @@ class HOIModel(nn.Module):
         # batch_denoised_features = F.interpolate(batch_denoised_features, scale_factor=2, mode='bilinear', align_corners=True)
         # print("batch_denoised_features after: ", batch_denoised_features.shape)
         
-        rois, additional_info, detection_counts= self.prepare_rois_cpu(detections_batch)
+        # rois, additional_info, detection_counts= self.prepare_rois_cpu(detections_batch)
 
         output_size = (7, 7)
+        rois_tensor = [tensor.to(self.device) for tensor in rois_tensor]
+        pooled_features = roi_align(batch_denoised_features, rois_tensor, output_size)
 
-        pooled_features = roi_align(batch_denoised_features, rois, output_size)
-
-        separated_features, separated_additional_info = self.separate_pooled_features(pooled_features, additional_info, detection_counts)
+        separated_features = self.separate_pooled_features(pooled_features, detection_counts)
 
         # 从 additional_info 中提取并区分 human 和 object 的 features
         all_pairs = []
@@ -303,7 +303,7 @@ class HOIModel(nn.Module):
         pair_start_indices = []
         hoi_results = []
         current_index = 0
-        for i, (features, info) in enumerate(zip(separated_features, separated_additional_info)):
+        for i, (features, info) in enumerate(zip(separated_features, additional_info)):
             human_features = []
             object_features = []
 
