@@ -259,11 +259,12 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     optimizer.zero_grad()
     has_non_zero_loss = False  # 标志位，跟踪是否有非零损失的累积
 
-    # debug
-    # input = []
-    
+    forward_total_time = 0
+    dataloarder_total_time = 0
+    dataloarder_start_time = time.time()
     for batch_idx, (images, targets, detections) in progress_bar:
-
+        dataloarder_time = time.time() - dataloarder_start_time
+        dataloarder_total_time += dataloarder_time
         images = images.to(device)
         # input.append((images, targets, detections))
         # targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
@@ -271,7 +272,10 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         # print("filename: ", targets[0]['filename'])
         
         with autocast():  # 使用 autocast 进行混合精度前向传播
+            forward_start_time = time.time()
             out = model(images, detections)
+            forward_time = time.time() - forward_start_time
+            forward_total_time += forward_time
             # print("out: ", out)
             # for image_results in out:
             #     for hoi in image_results:
@@ -344,7 +348,9 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
             tensorboard_writer.add_scalar('train_total_loss', loss.item(), global_step=global_step)  # 修改，记录总损失到Tensorboard
             tensorboard_writer.add_scalar('train_binary_loss', binary_loss.item(), global_step=global_step)  # 修改，记录二分类损失到Tensorboard
             tensorboard_writer.add_scalar('train_relation_loss', relation_loss.item(), global_step=global_step)  # 修改，记录多分类损失到Tensorboard
-
+            
+        dataloarder_start_time = time.time()
+        
     if (batch_idx + 1) % accumulation_steps != 0 and has_non_zero_loss:
         scaler.unscale_(optimizer)  # 取消缩放
         total_norm = clip_grad_norm_(model.parameters(), grad_clip_val)  # 计算梯度模并进行裁剪
@@ -364,7 +370,8 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     # 打印训练总时间
     elapsed_time = time.time() - start_time
     print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss  / num_batches:.4f}. Average relation loss: {epoch_relation_loss  / num_batches:.4f}. Average binary loss: {epoch_binary_loss  / num_batches:.4f}")
-    
+    print("forward_total_time: ", forward_total_time)
+    print("dataloarder_total_time: ", dataloarder_total_time)
     no_pairs_ratio = no_pairs_batches / num_batches
     no_results_ratio = no_results_images / total_images
     
