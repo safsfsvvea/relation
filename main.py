@@ -657,14 +657,14 @@ def main(args):
                                                                args.iterative_paradigm,
                                                                drop_last=False)
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
+                                   collate_fn=utils.collate_fn, num_workers=args.num_workers, pin_memory=True)
 
     
     # we do not need eval during pretraining.
     
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                    drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+                    drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers, pin_memory=True)
     
     # if args.distributed:
     #     print("it is here val!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")

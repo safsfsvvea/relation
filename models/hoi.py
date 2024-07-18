@@ -590,7 +590,7 @@ class backbone_time(nn.Module):
     
     def forward(self, nested_tensor: NestedTensor, rois_tensor, additional_info, detection_counts):
         images = nested_tensor.tensors
-        print("image device: ", images.device)
+        # print("image device: ", images.device)
         # print("image size", images.size())
         mask = nested_tensor.mask
         batch_size = images.size(0)

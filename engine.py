@@ -376,7 +376,7 @@ def train_backbone_time(model, criterion, optimizer, data_loader, device, epoch,
         dataloarder_total_time += dataloarder_time
         
         data_transfer_start_time = time.time()
-        # images = images.to(device)
+        images = images.to(device)
         
         # targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
         data_transfer_time = time.time() - data_transfer_start_time
@@ -433,8 +433,8 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         images = images.to(device)
         # print("images.shape: ", images.shape)
         # input.append((images, targets, detections))
-        # targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
+        targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
+        # targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
         # print("filename: ", targets[0]['filename'])
         
         with autocast():  # 使用 autocast 进行混合精度前向传播
