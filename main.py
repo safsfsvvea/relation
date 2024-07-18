@@ -543,7 +543,8 @@ def main(args):
         cost_verb_class=args.set_cost_verb_class,
         cost_bbox=args.set_cost_bbox,
         cost_giou=args.set_cost_giou,
-        add_negative_category=args.add_negative_category
+        add_negative_category=args.add_negative_category,
+        args=args
     )
     criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category, positive_negative=args.positive_negative)
     # optimizer = torch.optim.AdamW([

@@ -376,9 +376,9 @@ def train_backbone_time(model, criterion, optimizer, data_loader, device, epoch,
         dataloarder_total_time += dataloarder_time
         
         data_transfer_start_time = time.time()
-        images = images.to(device)
-
-        targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
+        # images = images.to(device)
+        
+        # targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
         data_transfer_time = time.time() - data_transfer_start_time
         data_transfer_total_time += data_transfer_time
         

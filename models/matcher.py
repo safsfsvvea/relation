@@ -19,9 +19,11 @@ from torch import nn
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 from torch.nn.utils.rnn import pad_packed_sequence, pad_sequence
 import torch.nn.functional as F
+import numpy as np
+import os
 
 class HungarianMatcherHOI_det(nn.Module):
-    def __init__(self, device, cost_obj_class=1.0, cost_verb_class=1.0, cost_bbox=1.0, cost_giou=1.0, add_negative_category=False):
+    def __init__(self, device, args, cost_obj_class=1.0, cost_verb_class=1.0, cost_bbox=1.0, cost_giou=1.0, add_negative_category=False):
         super().__init__()
         self.device = device
         self.cost_obj_class = cost_obj_class
@@ -29,6 +31,7 @@ class HungarianMatcherHOI_det(nn.Module):
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
         self.add_negative_category= add_negative_category
+        self.output_dir = args.output_dir
         print("self.cost_obj_class: ", self.cost_obj_class)
         print("self.cost_verb_class: ", self.cost_verb_class)
         print("self.cost_bbox: ", self.cost_bbox)
@@ -122,7 +125,20 @@ class HungarianMatcherHOI_det(nn.Module):
             # print("C shape: ", C.shape)
             # print("C: ", C)
             # 使用匈牙利算法进行匹配
-            sub_ind, obj_ind = linear_sum_assignment(C.numpy())
+            if not np.isfinite(C.numpy()).all():
+                print("Invalid entries found in cost matrix:", C)
+            try:
+                sub_ind, obj_ind = linear_sum_assignment(C.numpy())
+            except ValueError as e:
+                print(f"Exception caught: {e}")
+                checkpoint_filename = os.path.join(self.output_dir, 'debug_info.pth')
+                torch.save({
+                    'outputs': outputs,
+                    'targets': targets,
+                    'cost_matrix': C
+                }, checkpoint_filename)
+                raise
+            # sub_ind, obj_ind = linear_sum_assignment(C.numpy())
             all_indices.append((sub_ind, obj_ind))
         # print("all_indices: ", all_indices)
         return all_indices
