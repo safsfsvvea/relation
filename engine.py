@@ -172,8 +172,8 @@ def train_one_epoch_with_time(model, criterion, optimizer, data_loader, device, 
         dataloarder_total_time += dataloarder_time
         images = images.to(device)
         # input.append((images, targets, detections))
-        # targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
+        targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
+        # targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
         # print("filename: ", targets[0]['filename'])
         
         with autocast():  # 使用 autocast 进行混合精度前向传播
@@ -400,7 +400,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     # TODO: 优化成RLIP的样子
     model.train()
     model.backbone.eval()
-    # detector.model.train()
+    
     start_time = time.time()
     
     epoch_relation_loss  = 0.0
@@ -412,11 +412,11 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     no_pairs_batches = 0  # 用于统计 "No pairs found for this batch." 出现的 batch 数量
     no_results_images = 0  # 用于统计 "No results found for this image." 出现的图片数量
     total_images = 0  # 用于统计总的图片数量
-    subject_label_mismatches = 0
-    object_label_mismatches = 0
-    subject_box_mismatches = 0
-    object_box_mismatches = 0
-    total_pairs = 0  # 总的 matcher pairs 数量
+    # subject_label_mismatches = 0
+    # object_label_mismatches = 0
+    # subject_box_mismatches = 0
+    # object_box_mismatches = 0
+    # total_pairs = 0  # 总的 matcher pairs 数量
     progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}", mininterval=1.0)
     
     scaler = GradScaler()  # 初始化 GradScaler
@@ -425,29 +425,18 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
 
     # debug
     # input = []
-    forward_total_time = 0
+    # forward_total_time = 0
     for batch_idx, (images, targets, rois_tensor, additional_info, detection_counts, _) in progress_bar:
-        # print("rois_tensor: ", rois_tensor)
-        # print("additional_info: ", additional_info)
-        # print("detection_counts: ", detection_counts)
         images = images.to(device)
-        # print("images.shape: ", images.shape)
-        # input.append((images, targets, detections))
         targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
         # targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        # print("filename: ", targets[0]['filename'])
         
         with autocast():  # 使用 autocast 进行混合精度前向传播
-            forward_start_time = time.time()
+            # forward_start_time = time.time()
             out = model(images, rois_tensor, additional_info, detection_counts)
-            forward_time = time.time() - forward_start_time
-            forward_total_time += forward_time
-            # print("out: ", out)
-            # for image_results in out:
-            #     for hoi in image_results:
-            #         relation_score = torch.sigmoid(hoi['relation_score'])
-            #         max_score, max_index = torch.max(F.softmax(relation_score, dim=0), dim=0)
-            #         print(f"Highest probability relation score: {max_score.item()}, Index: {max_index.item()}")
+            # forward_time = time.time() - forward_start_time
+            # forward_total_time += forward_time
+
         if not all(len(output) == 0 for output in out):
             with autocast():  # 使用 autocast 进行混合精度损失计算
                 relation_loss, binary_loss = criterion(out, targets)
@@ -485,11 +474,11 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         no_results_images += model.no_results_count
         total_images += len(targets)  # 更新总的图片数量
         
-        subject_label_mismatches += criterion.subject_label_mismatch
-        object_label_mismatches += criterion.object_label_mismatch
-        subject_box_mismatches += criterion.subject_box_mismatch
-        object_box_mismatches += criterion.object_box_mismatch
-        total_pairs += criterion.total_pairs
+        # subject_label_mismatches += criterion.subject_label_mismatch
+        # object_label_mismatches += criterion.object_label_mismatch
+        # subject_box_mismatches += criterion.subject_box_mismatch
+        # object_box_mismatches += criterion.object_box_mismatch
+        # total_pairs += criterion.total_pairs
         
         if (batch_idx + 1) % print_freq == 0:
             avg_binary_loss = epoch_binary_loss / (batch_idx + 1)  # 修改，计算平均二分类损失
@@ -502,11 +491,11 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
         model.no_pairs_count = 0  # 重置计数器
         model.no_results_count = 0  # 重置计数器
         
-        criterion.subject_label_mismatch = 0
-        criterion.object_label_mismatch = 0
-        criterion.subject_box_mismatch = 0
-        criterion.object_box_mismatch = 0
-        criterion.total_pairs = 0
+        # criterion.subject_label_mismatch = 0
+        # criterion.object_label_mismatch = 0
+        # criterion.subject_box_mismatch = 0
+        # criterion.object_box_mismatch = 0
+        # criterion.total_pairs = 0
         
         # 保存训练中间信息到tensorboard
         if tensorboard_writer is not None:
@@ -534,31 +523,31 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_
     # 打印训练总时间
     elapsed_time = time.time() - start_time
     print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss  / num_batches:.4f}. Average relation loss: {epoch_relation_loss  / num_batches:.4f}. Average binary loss: {epoch_binary_loss  / num_batches:.4f}")
-    print("forward_total_time: ", forward_total_time)
+    # print("forward_total_time: ", forward_total_time)
     no_pairs_ratio = no_pairs_batches / num_batches
     no_results_ratio = no_results_images / total_images
     
-    subject_label_mismatch_ratio = subject_label_mismatches / total_pairs if total_pairs else 0
-    object_label_mismatch_ratio = object_label_mismatches / total_pairs if total_pairs else 0
-    subject_box_mismatch_ratio = subject_box_mismatches / total_pairs if total_pairs else 0
-    object_box_mismatch_ratio = object_box_mismatches / total_pairs if total_pairs else 0
+    # subject_label_mismatch_ratio = subject_label_mismatches / total_pairs if total_pairs else 0
+    # object_label_mismatch_ratio = object_label_mismatches / total_pairs if total_pairs else 0
+    # subject_box_mismatch_ratio = subject_box_mismatches / total_pairs if total_pairs else 0
+    # object_box_mismatch_ratio = object_box_mismatches / total_pairs if total_pairs else 0
     
     print(f"No pairs found ratio: {no_pairs_ratio:.4f}")
     print(f"No results found ratio: {no_results_ratio:.4f}")
     
-    print(f"Subject label mismatch ratio: {subject_label_mismatch_ratio:.4f}")
-    print(f"Object label mismatch ratio: {object_label_mismatch_ratio:.4f}")
-    print(f"Subject box mismatch ratio: {subject_box_mismatch_ratio:.4f}")
-    print(f"Object box mismatch ratio: {object_box_mismatch_ratio:.4f}")
+    # print(f"Subject label mismatch ratio: {subject_label_mismatch_ratio:.4f}")
+    # print(f"Object label mismatch ratio: {object_label_mismatch_ratio:.4f}")
+    # print(f"Subject box mismatch ratio: {subject_box_mismatch_ratio:.4f}")
+    # print(f"Object box mismatch ratio: {object_box_mismatch_ratio:.4f}")
 
     if tensorboard_writer is not None:
         tensorboard_writer.add_scalar('no_pairs_ratio', no_pairs_ratio, epoch)
         tensorboard_writer.add_scalar('no_results_ratio', no_results_ratio, epoch)
         
-        tensorboard_writer.add_scalar('subject_label_mismatch_ratio', subject_label_mismatch_ratio, epoch)
-        tensorboard_writer.add_scalar('object_label_mismatch_ratio', object_label_mismatch_ratio, epoch)
-        tensorboard_writer.add_scalar('subject_box_mismatch_ratio', subject_box_mismatch_ratio, epoch)
-        tensorboard_writer.add_scalar('object_box_mismatch_ratio', object_box_mismatch_ratio, epoch)
+        # tensorboard_writer.add_scalar('subject_label_mismatch_ratio', subject_label_mismatch_ratio, epoch)
+        # tensorboard_writer.add_scalar('object_label_mismatch_ratio', object_label_mismatch_ratio, epoch)
+        # tensorboard_writer.add_scalar('subject_box_mismatch_ratio', subject_box_mismatch_ratio, epoch)
+        # tensorboard_writer.add_scalar('object_box_mismatch_ratio', object_box_mismatch_ratio, epoch)
     return epoch_loss / num_batches, epoch_relation_loss / num_batches, epoch_binary_loss  / num_batches
 
 

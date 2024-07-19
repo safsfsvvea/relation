@@ -135,7 +135,11 @@ class HungarianMatcherHOI_det(nn.Module):
                 torch.save({
                     'outputs': outputs,
                     'targets': targets,
-                    'cost_matrix': C
+                    'cost_matrix': C,
+                    'cost_obj_class': self.cost_obj_class,
+                    'cost_verb_class': self.cost_verb_class,
+                    'cost_bbox': self.cost_bbox,
+                    'cost_giou': self.cost_giou,
                 }, checkpoint_filename)
                 raise
             # sub_ind, obj_ind = linear_sum_assignment(C.numpy())

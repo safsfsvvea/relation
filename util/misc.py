@@ -326,26 +326,26 @@ class NestedTensor(object):
         self.tensors = tensors
         self.mask = mask
 
-    # def to(self, device):
-    #     # type: (Device) -> NestedTensor # noqa
-    #     cast_tensor = self.tensors.to(device)
-    #     mask = self.mask
-    #     if mask is not None:
-    #         assert mask is not None
-    #         cast_mask = mask.to(device)
-    #     else:
-    #         cast_mask = None
-    #     return NestedTensor(cast_tensor, cast_mask)
-    def to(self, device, non_blocking=False):
-        # type: (Device, bool) -> NestedTensor # noqa
-        cast_tensor = self.tensors.to(device, non_blocking=non_blocking)
+    def to(self, device):
+        # type: (Device) -> NestedTensor # noqa
+        cast_tensor = self.tensors.to(device)
         mask = self.mask
         if mask is not None:
             assert mask is not None
-            cast_mask = mask.to(device, non_blocking=non_blocking)
+            cast_mask = mask.to(device)
         else:
             cast_mask = None
         return NestedTensor(cast_tensor, cast_mask)
+    # def to(self, device, non_blocking=False):
+    #     # type: (Device, bool) -> NestedTensor # noqa
+    #     cast_tensor = self.tensors.to(device, non_blocking=non_blocking)
+    #     mask = self.mask
+    #     if mask is not None:
+    #         assert mask is not None
+    #         cast_mask = mask.to(device, non_blocking=non_blocking)
+    #     else:
+    #         cast_mask = None
+    #     return NestedTensor(cast_tensor, cast_mask)
     
     
     def decompose(self):
