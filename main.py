@@ -815,6 +815,9 @@ def main(args):
             }, filename=checkpoint_filename)
             
             print(f"Checkpoint saved to {checkpoint_filename}")
+            
+            # Clear unused memory
+            torch.cuda.empty_cache()
         
         elapsed_time = time.time() - start_time
         print(f"Training completed in {elapsed_time:.2f} seconds")
