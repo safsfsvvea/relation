@@ -2,7 +2,7 @@ from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
 from models.hoi import HOIModel, CriterionHOI, PostProcessHOI, backbone_time
 from models.matcher import HungarianMatcherHOI_det
-from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time, train_backbone_time
+from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time, train_backbone_time, evaluate_hoi_single
 import datasets
 from datasets.hico import CustomSubset
 import util.misc as utils
@@ -515,6 +515,7 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--eval_single', action='store_true', help='eval for each single image in the dataset, and save gts for images with mAP lower than 0.5')
     parser.add_argument('--num_workers', default=2, type=int)
 
     # distributed training parameters
@@ -744,6 +745,9 @@ def main(args):
             ensure_dir(args.output_dir)
         if args.hoi and args.eval:
             test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
+            return
+        if args.hoi and args.eval_single:
+            test_stats = evaluate_hoi_single(model, postprocessors, data_loader_val, args.subject_category_id, device, args, threshold=0.5)
             return
         
         tensorboard_writer = SummaryWriter(log_dir=args.log_dir)

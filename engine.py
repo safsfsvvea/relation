@@ -13,6 +13,9 @@ import torchvision.transforms as T
 import torch.profiler
 from torch.cuda.amp import GradScaler, autocast  # 添加混合精度相关库
 from torch.nn.utils import clip_grad_norm_
+import json
+from pathlib import Path
+
 def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
     model.train()
     start_time = time.time()
@@ -567,39 +570,41 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     #debug
     # input = []
     
-    with torch.no_grad():
-        for samples, targets, rois_tensor, additional_info, detection_counts, detections in metric_logger.log_every(data_loader, print_freq, header):
-            # targets: tuple, len(tuple) = batch_size
-            #          element in tuple: a dict, whose keys are ['orig_size', 'size', 'boxes', 'labels', 'id', 'hois']
-                    
-            # print(targets[0]['orig_size'])
-            # print(targets[0]['size'])
-            # print('')
-            samples = samples.to(device)
+    for samples, targets, rois_tensor, additional_info, detection_counts, detections in metric_logger.log_every(data_loader, print_freq, header):
+        # targets: tuple, len(tuple) = batch_size
+        #          element in tuple: a dict, whose keys are ['orig_size', 'size', 'boxes', 'labels', 'id', 'hois']
+                
+        # print(targets[0]['orig_size'])
+        # print(targets[0]['size'])
+        # print('')
+        samples = samples.to(device)
 
-            # input.append((samples, targets, detections))
-            
-            outputs = model(samples, rois_tensor, additional_info, detection_counts)
-            # print("outputs: ", outputs)
-            # loss = criterion(outputs, targets)
-            # print("loss: ", loss)
-            results = postprocessors(outputs, detections)
-            # print(results)
-            # print(len(list(itertools.chain.from_iterable(utils.all_gather(results)))))
-            # print(list(itertools.chain.from_iterable(utils.all_gather(results)))[0])
-            
-            # preds: merge predicted batch data
-            preds.extend(list(itertools.chain.from_iterable(utils.all_gather(results))))
-            # For avoiding a runtime error, the copy is used
-            # gts: merge ground truth batch data
-            gts.extend(list(itertools.chain.from_iterable(utils.all_gather(copy.deepcopy(targets)))))
+        # input.append((samples, targets, detections))
+        
+        outputs = model(samples, rois_tensor, additional_info, detection_counts)
+        # print("outputs: ", outputs)
+        # loss = criterion(outputs, targets)
+        # print("loss: ", loss)
+        results = postprocessors(outputs, detections)
+        # print(results)
+        # print(len(list(itertools.chain.from_iterable(utils.all_gather(results)))))
+        # print(list(itertools.chain.from_iterable(utils.all_gather(results)))[0])
+        
+        preds.extend(results)
+        gts.extend(copy.deepcopy(targets))
+        
+        # preds: merge predicted batch data
+        # preds.extend(list(itertools.chain.from_iterable(utils.all_gather(results)))) #用于多GPU训练
+        # For avoiding a runtime error, the copy is used
+        # gts: merge ground truth batch data
+        # gts.extend(list(itertools.chain.from_iterable(utils.all_gather(copy.deepcopy(targets))))) #用于多GPU训练
             
             # break
             # # Add for evaluation
             # filename_list += [t['filename'] for t in targets]
 
     # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
+    # metric_logger.synchronize_between_processes() # 用于多GPU训练
 
     img_ids = [img_gts['id'] for img_gts in gts]
     _, indices = np.unique(img_ids, return_index=True)
@@ -692,6 +697,38 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     # print("len(gts): ", len(gts))
     print("gts[0]: ", gts[0]) 
     return stats
+
+@torch.no_grad()
+def evaluate_hoi_single(model, postprocessors, data_loader, subject_category_id, device, args, threshold=0.5):
+    model.eval()
+    low_mAP_info = []
+
+    for samples, targets, rois_tensor, additional_info, detection_counts, detections in data_loader:
+        samples = samples.to(device)
+        outputs = model(samples, rois_tensor, additional_info, detection_counts)
+        
+        results = postprocessors(outputs, detections)
+        preds = results
+        gts = copy.deepcopy(targets)
+
+        # Evaluate using HICOEvaluator
+        evaluator = HICOEvaluator(preds, gts, subject_category_id, data_loader.dataset.rare_triplets,
+                                  data_loader.dataset.non_rare_triplets, data_loader.dataset.correct_mat, args)
+        stats = evaluator.evaluate()
+        
+        # Check mAP and save low mAP info
+        if stats['mAP'] < threshold:
+            for gt in gts:
+                low_mAP_info.append({
+                    'filename': gt['filename'],
+                    'ground_truth': gt
+                })
+
+    # Save low mAP info to JSON
+    low_mAP_file = args.output_dir / "low_mAP_info.json"
+    with open(low_mAP_file, 'w') as f:
+        json.dump(low_mAP_info, f, indent=4)
+
 
 def evaluate_det_hico(model, data_loader, device, args):
     model.eval()
