@@ -13,7 +13,7 @@ from torchvision.ops import box_iou
 from models.position_encoding import PositionEmbeddingSine, PositionEmbeddingSineHW
 
 class HOIModel(nn.Module):
-    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1, denoised=True, position_encoding_type=None, use_attention=True, use_CLS=True):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1, denoised=True, position_encoding_type=None, use_attention=True, use_CLS=True, roi_size=7, use_self_attention=True):
         super(HOIModel, self).__init__()
         self.backbone = backbone
         self.device = device
@@ -30,8 +30,10 @@ class HOIModel(nn.Module):
         self.denoised = denoised
         self.position_encoding = None
         self.use_CLS = use_CLS
+        self.roi_size= roi_size
+        self.use_self_attention = use_self_attention
         if use_attention:
-            if use_CLS:
+            if use_CLS or self.use_self_attention:
                 self.attention = MultiheadAttentionStack(embed_dim=feature_dim, num_heads=num_heads, num_layers=num_layers, dropout=dropout)
             else:
                 self.attention = BidirectionalCrossAttentionStack(embed_dim=feature_dim, num_heads=num_heads, num_layers=num_layers, dropout=dropout)
@@ -134,6 +136,8 @@ class HOIModel(nn.Module):
                     nn.Dropout(dropout),  
                     nn.Linear(64, self.num_category)  
                 )
+        print("self.roi_size: ", self.roi_size)
+        print("self.use_self_attention: ", self.use_self_attention)
         print("self.use_CLS: ", self.use_CLS)
         print("self.attention: ", self.attention)
         print("position_encoding_type: ", position_encoding_type)
@@ -293,7 +297,8 @@ class HOIModel(nn.Module):
         # Mask掉human内部、object内部以及cls token之间的注意力
         attn_mask[:num_human, :num_human] = True
         attn_mask[num_human:num_human+num_object, num_human:num_human+num_object] = True
-        attn_mask[-num_cls:, -num_cls:] = True
+        if num_cls > 0:
+            attn_mask[-num_cls:, -num_cls:] = True
 
         return attn_mask
     
@@ -330,7 +335,7 @@ class HOIModel(nn.Module):
         
         # rois, additional_info, detection_counts= self.prepare_rois_cpu(detections_batch)
         if self.attention is not None:
-            output_size = (7, 7)
+            output_size = (self.roi_size, self.roi_size)
         else:
             output_size = (1, 1)
         rois_tensor = [tensor.to(self.device) for tensor in rois_tensor]
@@ -375,6 +380,9 @@ class HOIModel(nn.Module):
                         if self.use_CLS:
                             combined_feature = torch.cat([human[0].unsqueeze(1), obj[0].unsqueeze(1), CLS_token[i].unsqueeze(1).unsqueeze(2)], dim=-1)
                             query_list.append(combined_feature)
+                        elif self.use_self_attention:
+                            combined_feature = torch.cat([human[0].unsqueeze(1), obj[0].unsqueeze(1)], dim=-1)
+                            query_list.append(combined_feature)
                         else:
                             query_list.append(human[0].unsqueeze(1))  # [768, 49] -> [768, 1, 49]
                             key_list.append(obj[0].unsqueeze(1))
@@ -398,10 +406,14 @@ class HOIModel(nn.Module):
         
         if self.attention is not None:
             if query_list:
-                if self.use_CLS:
+                if self.use_CLS or self.use_self_attention:
                     query = torch.cat(query_list, dim=1)  # [768, 1, 99] -> [768, N, 99]
                     query = query.permute(2, 1, 0)  # [768, N, 99] -> [99, N, 768]
-                    attn_mask = self.generate_attention_mask(num_human=49, num_object=49, num_cls=1)
+                    if self.use_self_attention:
+                        attn_mask = self.generate_attention_mask(num_human=self.roi_size**2, num_object=self.roi_size**2, num_cls=0)
+                        # print("attn_mask: ", attn_mask)
+                    else:
+                        attn_mask = self.generate_attention_mask(num_human=self.roi_size**2, num_object=self.roi_size**2, num_cls=1)
                     query_out = self.attention(query=query, key=query ,value=query, attn_mask=attn_mask)
                 else:
                     query = torch.cat(query_list, dim=1)  # [768, 1, 49] -> [768, N, 49]
@@ -422,7 +434,7 @@ class HOIModel(nn.Module):
                 for i, score in enumerate(relation_scores):
                     hoi_results[i]['relation_score'] = score
                 if torch.isnan(relation_scores).any():
-                        raise ValueError("NaN detected in relation_scores.")
+                        print("NaN detected in relation_scores.")
                 # positive_pairs = all_pairs_tensor[positive_labels]
                 # if positive_pairs.size(0) > 0:
                 #     relation_scores = self.mlp(positive_pairs)
