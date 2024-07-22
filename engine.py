@@ -703,7 +703,9 @@ def evaluate_hoi_single(model, postprocessors, data_loader, subject_category_id,
     model.eval()
     low_mAP_info = []
 
-    for samples, targets, rois_tensor, additional_info, detection_counts, detections in data_loader:
+    metric_logger = utils.MetricLogger(delimiter="  ")
+    header = 'Test:'
+    for samples, targets, rois_tensor, additional_info, detection_counts, detections in metric_logger.log_every(data_loader, 500, header):
         samples = samples.to(device)
         outputs = model(samples, rois_tensor, additional_info, detection_counts)
         
@@ -719,10 +721,30 @@ def evaluate_hoi_single(model, postprocessors, data_loader, subject_category_id,
         # Check mAP and save low mAP info
         if stats['mAP'] < threshold:
             for gt in gts:
-                low_mAP_info.append({
-                    'filename': gt['filename'],
-                    'ground_truth': gt
-                })
+                log_info = {
+                        'filename': gt['filename'],
+                        'ground_truth': gt,
+                        'stats': stats,
+                        'predictions': preds
+                    }
+                if preds[0]:
+                    logits = preds[0]['verb_scores']
+                    sorted_probabilities, sorted_indices = torch.sort(logits, dim=1, descending=True)
+                    num_hois = len(gts[0]['hois'])
+                    top_probabilities = sorted_probabilities[:, :num_hois]
+                    top_labels = sorted_indices[:, :num_hois]
+
+                    log_info.update({
+                        'logits': logits.tolist(),
+                        'top_probabilities': top_probabilities.tolist(),
+                        'top_labels': top_labels.tolist(),
+                        'labels_shape': preds[0]['labels'].shape,
+                        'boxes_shape': preds[0]['boxes'].shape,
+                        'verb_scores_shape': preds[0]['verb_scores'].shape,
+                        'sub_ids_shape': preds[0]['sub_ids'].shape,
+                        'obj_ids_shape': preds[0]['obj_ids'].shape
+                    })
+                    low_mAP_info.append(log_info)
 
     # Save low mAP info to JSON
     low_mAP_file = args.output_dir / "low_mAP_info.json"
