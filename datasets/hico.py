@@ -282,7 +282,11 @@ class HICODetection_det(torch.utils.data.Dataset):
         self.img_folder = img_folder
         with open(anno_file, 'r') as f:
             self.annotations = json.load(f)
-            
+        if img_set == 'val':
+            detection_results = args.hico_det_file_test     
+        # print("img_set: ", img_set)
+        # print("args.hico_det_file_test in class: ", args.hico_det_file_test)
+        # print("detection_results: ", detection_results)   
         with open(detection_results, 'r') as f:
             self.detection_results = json.load(f)
         # print(len(self.annotations))
@@ -367,6 +371,8 @@ class HICODetection_det(torch.utils.data.Dataset):
         target = {}
         target['orig_size'] = torch.as_tensor([int(h), int(w)])
         target['size'] = torch.as_tensor([int(h), int(w)])
+        detection['orig_size'] = torch.as_tensor([int(h), int(w)])
+        detection['size'] = torch.as_tensor([int(h), int(w)])
         if self.img_set == 'train':
             # clamp the box and drop those unreasonable ones
             boxes[:, 0::2].clamp_(min=0, max=w)  # xyxy    clamp x to 0~w
@@ -482,9 +488,39 @@ class HICODetection_det(torch.utils.data.Dataset):
         # print("detection['scores'] shape: ", detection['scores'].shape)
         # print("target['scores']: ", target['scores'])
         # print("target['scores'] shape: ", target['scores'].shape)
-        
-        return img, target, detection
+        rois_tensor, additional_info, detection_counts = self.prepare_rois(detection)
+        return img, target, rois_tensor, additional_info, detection_counts, detection
 
+    def prepare_rois(self, detection):
+        scale_factor = 14  # Assuming patch_size = 14
+
+        H, W = detection['size']
+        if not detection['boxes'].nelement():
+            return torch.empty((0, 4)), [], 0
+
+        boxes = detection['boxes']
+        labels = detection['labels']
+        scores = detection['scores']
+
+        cx, cy, bw, bh = boxes.T
+        xmin = (cx - bw / 2) * W
+        ymin = (cy - bh / 2) * H
+        xmax = (cx + bw / 2) * W
+        ymax = (cy + bh / 2) * H
+
+        scaled_xmin = xmin / scale_factor
+        scaled_ymin = ymin / scale_factor
+        scaled_xmax = xmax / scale_factor
+        scaled_ymax = ymax / scale_factor
+
+        rois = torch.stack([scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
+
+        additional_info = [{'label': label.item(), 'bbox': [roi[0].item() * scale_factor, roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor], 'score': score.item()}
+                           for label, roi, score in zip(labels, rois, scores)]
+
+        detection_counts = len(boxes)
+        return rois.float(), additional_info, detection_counts
+    
     def set_rare_hois(self, anno_file):
         with open(anno_file, 'r') as f:
             annotations = json.load(f)
@@ -1223,14 +1259,15 @@ def build(image_set, args):
                                 num_queries=args.num_queries)
     else:
         if args.dataset_file == 'hico_det':
+            # print("args.hico_det_file_test: ", args.hico_det_file_test)
             dataset = HICODetection_det(image_set, img_folder, anno_file, detection_results = args.hico_det_file, transforms=make_hico_det_transforms(image_set),
                                 num_queries=args.num_queries, args = args)
-            print("it is HICODetection_det!!!!!!!!!!!!!!!!!!")
-            print("image_set: ", image_set)
-            print("args.zero_shot_setting: ", args.zero_shot_setting)
-            print("args.few_shot_transfer: ", args.few_shot_transfer)
-            print("args.use_correct_subject_category_hico: ", args.use_correct_subject_category_hico)
-            print("args.relation_label_noise: ", args.relation_label_noise)
+            # print("it is HICODetection_det!!!!!!!!!!!!!!!!!!")
+            # print("image_set: ", image_set)
+            # print("args.zero_shot_setting: ", args.zero_shot_setting)
+            # print("args.few_shot_transfer: ", args.few_shot_transfer)
+            # print("args.use_correct_subject_category_hico: ", args.use_correct_subject_category_hico)
+            # print("args.relation_label_noise: ", args.relation_label_noise)
         elif args.dataset_file == 'hico_det_gt':
             if args.notransform: 
                 #暂时关闭transform以debug

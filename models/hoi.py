@@ -670,6 +670,8 @@ class CriterionHOI(nn.Module):
         self.gamma = gamma
         self.loss_type = loss_type
         print("loss type: ", self.loss_type)
+        print("self.alpha: ", self.alpha)
+        print("self.gamma: ", self.gamma)
         # 初始化不匹配计数器
         self.subject_label_mismatch = 0
         self.object_label_mismatch = 0

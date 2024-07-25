@@ -400,6 +400,8 @@ def get_args_parser():
 
 
     # Loss
+    parser.add_argument('--gamma', default=2.0, type=float, help='gamma for focal loss')
+    parser.add_argument('--alpha', default=0.25, type=float, help='alpha for focal loss')
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
                         help="Disables auxiliary decoding losses (loss at each layer)")
     parser.add_argument('--entropy_bound', action = 'store_true',
@@ -486,7 +488,8 @@ def get_args_parser():
                         help = "The detection result file for COCO")
     parser.add_argument('--hico_det_file', type=str, 
                         help = "The detection result file for HICO")
-    
+    parser.add_argument('--hico_det_file_test', type=str, 
+                        help = "The detection result file for HICO test set")
     parser.add_argument('--vg_rel_anno_file', type=str, 
                         help = "The annotation file for VG relation detection, used in the ConcatDataset mode.")
     parser.add_argument('--vg_keep_names_freq_file', type=str, 
@@ -558,7 +561,7 @@ def main(args):
         add_negative_category=args.add_negative_category,
         args=args
     )
-    criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category, positive_negative=args.positive_negative)
+    criterion = CriterionHOI(matcher=matcher, device=device, alpha=args.alpha, gamma=args.gamma, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category, positive_negative=args.positive_negative)
     # optimizer = torch.optim.AdamW([
     # {'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr},
     # {'params': filter(lambda p: p.requires_grad, detector.parameters()), 'lr': args.lr_detector},
@@ -769,7 +772,21 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
+            try:
+                train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
+            except Exception as e:
+                print(f"Error encountered during training at epoch {epoch}: {e}")
+                state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
+                checkpoint_filename = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}_error.pth.tar")
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'state_dict': state_dict_to_save,
+                    'optimizer': optimizer.state_dict(),
+                    'loss': train_loss if 'train_loss' in locals() else None,
+                }, filename=checkpoint_filename)
+                print(f"Checkpoint saved due to error at {checkpoint_filename}")
+                break  # Optionally, stop training on error
+            
             state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
             if args.output_dir and epoch % 100 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')

@@ -1,11 +1,12 @@
 import torch
 
-checkpoint_filename = '/bd_byt4090i0/users/clin/relation/results/denoised_dinov2/bi_attention/all/attention_layers1/clip_grad_01/multistep/dropout01_batch64/debug_info.pth'
+checkpoint_filename = '/bd_byt4090i1/users/clin/relation/results/denoised_dinov2/position_encoding_HW/bi_attention/all/attention_layers1/clip_grad_01/multistep/dropout01_batch64_gamma01_alpha05/debug_info.pth'
 checkpoint = torch.load(checkpoint_filename)
 
 outputs = checkpoint['outputs']
 targets = checkpoint['targets']
 cost_matrix = checkpoint['cost_matrix']
+print("outputs: ", outputs)
 # 检查outputs中的所有键是否包含nan
 nan_found = False
 for i, output_list in enumerate(outputs):

@@ -15,7 +15,16 @@ from torch.cuda.amp import GradScaler, autocast  # 添加混合精度相关库
 from torch.nn.utils import clip_grad_norm_
 import json
 from pathlib import Path
-
+import os
+def tensor_to_list(tensor):
+    if isinstance(tensor, torch.Tensor):
+        return tensor.tolist()
+    elif isinstance(tensor, list):
+        return [tensor_to_list(t) for t in tensor]
+    elif isinstance(tensor, dict):
+        return {k: tensor_to_list(v) for k, v in tensor.items()}
+    else:
+        return tensor
 def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
     model.train()
     start_time = time.time()
@@ -720,34 +729,32 @@ def evaluate_hoi_single(model, postprocessors, data_loader, subject_category_id,
         
         # Check mAP and save low mAP info
         if stats['mAP'] < threshold:
-            for gt in gts:
-                log_info = {
-                        'filename': gt['filename'],
-                        'ground_truth': gt,
-                        'stats': stats,
-                        'predictions': preds
-                    }
-                if preds[0]:
-                    logits = preds[0]['verb_scores']
-                    sorted_probabilities, sorted_indices = torch.sort(logits, dim=1, descending=True)
-                    num_hois = len(gts[0]['hois'])
-                    top_probabilities = sorted_probabilities[:, :num_hois]
-                    top_labels = sorted_indices[:, :num_hois]
-
-                    log_info.update({
-                        'logits': logits.tolist(),
-                        'top_probabilities': top_probabilities.tolist(),
-                        'top_labels': top_labels.tolist(),
-                        'labels_shape': preds[0]['labels'].shape,
-                        'boxes_shape': preds[0]['boxes'].shape,
-                        'verb_scores_shape': preds[0]['verb_scores'].shape,
-                        'sub_ids_shape': preds[0]['sub_ids'].shape,
-                        'obj_ids_shape': preds[0]['obj_ids'].shape
-                    })
-                    low_mAP_info.append(log_info)
+            log_info = {
+                    'ground_truth': tensor_to_list(gts[0]),
+                    'stats': stats,
+                }
+            if preds[0]:
+                logits = preds[0]['verb_scores']
+                sorted_probabilities, sorted_indices = torch.sort(logits, dim=1, descending=True)
+                num_hois = len(gts[0]['hois'])
+                top_probabilities = sorted_probabilities[:, :num_hois]
+                top_labels = sorted_indices[:, :num_hois]
+                pred_info = {
+                    'labels': tensor_to_list(preds[0]['labels']),
+                    'boxes': tensor_to_list(preds[0]['boxes']),
+                    'verb_scores': tensor_to_list(preds[0]['verb_scores']),
+                    'sub_ids': tensor_to_list(preds[0]['sub_ids']),
+                    'obj_ids': tensor_to_list(preds[0]['obj_ids']),
+                    'top_probabilities': tensor_to_list(top_probabilities),
+                    'top_labels': tensor_to_list(top_labels),
+                }
+                log_info.update({
+                    'prediction': pred_info
+                })
+                low_mAP_info.append(log_info)
 
     # Save low mAP info to JSON
-    low_mAP_file = args.output_dir / "low_mAP_info.json"
+    low_mAP_file = os.path.join(args.output_dir, "low_mAP_info.json")
     with open(low_mAP_file, 'w') as f:
         json.dump(low_mAP_info, f, indent=4)
 
