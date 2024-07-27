@@ -408,159 +408,116 @@ def train_backbone_time(model, criterion, optimizer, data_loader, device, epoch,
     print("data_transfer_total_time: ", data_transfer_total_time)  
     return epoch_loss / num_batches, epoch_relation_loss / num_batches, epoch_binary_loss  / num_batches
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, lr_scheduler=None, print_freq=100, accumulation_steps=32, grad_clip_val=1.0, tensorboard_writer=None, args=None):
-    # TODO: 优化成RLIP的样子
+
+from accelerate import Accelerator
+
+
+def train_one_epoch(accelerator, model, criterion, optimizer, data_loader, epoch, lr_scheduler=None, print_freq=100,
+                    accumulation_steps=32, grad_clip_val=1.0, tensorboard_writer=None, args=None):
+    print(f"---------model dtype: {next(model.parameters()).dtype}")
+    dtype = torch.bfloat16
     model.train()
     model.backbone.eval()
-    
-    start_time = time.time()
-    
-    epoch_relation_loss  = 0.0
-    epoch_binary_loss = 0.0  # 新增，用于记录二分类损失
-    epoch_loss  = 0.0
-    
-    num_batches = len(data_loader)
-    
-    no_pairs_batches = 0  # 用于统计 "No pairs found for this batch." 出现的 batch 数量
-    no_results_images = 0  # 用于统计 "No results found for this image." 出现的图片数量
-    total_images = 0  # 用于统计总的图片数量
-    # subject_label_mismatches = 0
-    # object_label_mismatches = 0
-    # subject_box_mismatches = 0
-    # object_box_mismatches = 0
-    # total_pairs = 0  # 总的 matcher pairs 数量
-    progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}", mininterval=1.0)
-    
-    scaler = GradScaler()  # 初始化 GradScaler
-    optimizer.zero_grad()
-    has_non_zero_loss = False  # 标志位，跟踪是否有非零损失的累积
 
-    # debug
-    # input = []
-    # forward_total_time = 0
+    start_time = time.time()
+
+    epoch_relation_loss = 0.0
+    epoch_binary_loss = 0.0
+    epoch_loss = 0.0
+
+    num_batches = len(data_loader)
+
+    no_pairs_batches = 0
+    no_results_images = 0
+    total_images = 0
+
+    progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}", mininterval=1.0)
+
+    optimizer.zero_grad()
+    has_non_zero_loss = False
+
     for batch_idx, (images, targets, rois_tensor, additional_info, detection_counts, _) in progress_bar:
-        images = images.to(device)
-        targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        # targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        
-        with autocast():  # 使用 autocast 进行混合精度前向传播
-            # forward_start_time = time.time()
-            out = model(images, rois_tensor, additional_info, detection_counts)
-            # forward_time = time.time() - forward_start_time
-            # forward_total_time += forward_time
+        # print(f"---------images dtype: {images.dtype}")
+        out = model(images, rois_tensor, additional_info, detection_counts)
 
         if not all(len(output) == 0 for output in out):
-            with autocast():  # 使用 autocast 进行混合精度损失计算
-                relation_loss, binary_loss = criterion(out, targets)
-                loss = relation_loss + binary_loss * 0.1
+            relation_loss, binary_loss = criterion(out, targets)
+            loss = relation_loss + binary_loss * 0.1
             if loss > 0:
-                relation_loss = relation_loss / accumulation_steps  # 损失均摊到梯度累积步骤数
-                binary_loss = binary_loss / accumulation_steps  # 损失均摊到梯度累积步骤数
-                loss = loss / accumulation_steps  # 损失均摊到梯度累积步骤数
-                scaler.scale(loss).backward()  
+                relation_loss = relation_loss / accumulation_steps
+                binary_loss = binary_loss / accumulation_steps
+                loss = loss / accumulation_steps
+                accelerator.backward(loss)
 
-                has_non_zero_loss = True  # 设置标志位
-                
+                has_non_zero_loss = True
+
                 if (batch_idx + 1) % accumulation_steps == 0:
-                    scaler.unscale_(optimizer)  # 取消缩放
-                    total_norm = clip_grad_norm_(model.parameters(), grad_clip_val)  # 计算梯度模并进行裁剪
-                    
-                    scaler.step(optimizer)  # 使用 GradScaler 进行优化步骤
-                    scaler.update()
-                    optimizer.zero_grad()  # 清空梯度
-                    if tensorboard_writer is not None:
-                        global_step = epoch * num_batches + batch_idx
-                        tensorboard_writer.add_scalar('grad_norm', total_norm, global_step)  # 将梯度模写入TensorBoard
+                    if grad_clip_val > 0:
+                        accelerator.clip_grad_norm_(model.parameters(), grad_clip_val)
+
+                    optimizer.step()
+                    optimizer.zero_grad()
                     if args.schedule == "linear_with_warmup":
                         lr_scheduler.step()
         else:
-            relation_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
-            binary_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
+            relation_loss = torch.tensor(0.0, device=accelerator.device, requires_grad=True)
+            binary_loss = torch.tensor(0.0, device=accelerator.device, requires_grad=True)
             loss = relation_loss + binary_loss * 0.1
-            scaler.scale(loss).backward() 
-        epoch_binary_loss += binary_loss.item() * accumulation_steps  # 修改，记录二分类损失
-        epoch_relation_loss += relation_loss.item() * accumulation_steps  # 修改，记录多分类损失
+            accelerator.backward(loss)
+
+        epoch_binary_loss += binary_loss.item() * accumulation_steps
+        epoch_relation_loss += relation_loss.item() * accumulation_steps
         epoch_loss += loss.item() * accumulation_steps
-        
+
         no_pairs_batches += model.no_pairs_count
         no_results_images += model.no_results_count
-        total_images += len(targets)  # 更新总的图片数量
-        
-        # subject_label_mismatches += criterion.subject_label_mismatch
-        # object_label_mismatches += criterion.object_label_mismatch
-        # subject_box_mismatches += criterion.subject_box_mismatch
-        # object_box_mismatches += criterion.object_box_mismatch
-        # total_pairs += criterion.total_pairs
-        
+        total_images += len(targets)
+
         if (batch_idx + 1) % print_freq == 0:
-            avg_binary_loss = epoch_binary_loss / (batch_idx + 1)  # 修改，计算平均二分类损失
-            avg_relation_loss = epoch_relation_loss / (batch_idx + 1)  # 修改，计算平均多分类损失
+            avg_binary_loss = epoch_binary_loss / (batch_idx + 1)
+            avg_relation_loss = epoch_relation_loss / (batch_idx + 1)
             avg_loss = epoch_loss / (batch_idx + 1)
             elapsed_time = time.time() - start_time
             eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
-            progress_bar.set_postfix(total_loss=f"{avg_loss:.4f}", binary_loss=f"{avg_binary_loss:.4f}", relation_loss=f"{avg_relation_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")  # 修改，显示二分类和多分类损失
-        
-        model.no_pairs_count = 0  # 重置计数器
-        model.no_results_count = 0  # 重置计数器
-        
-        # criterion.subject_label_mismatch = 0
-        # criterion.object_label_mismatch = 0
-        # criterion.subject_box_mismatch = 0
-        # criterion.object_box_mismatch = 0
-        # criterion.total_pairs = 0
-        
-        # 保存训练中间信息到tensorboard
+            progress_bar.set_postfix(total_loss=f"{avg_loss:.4f}", binary_loss=f"{avg_binary_loss:.4f}",
+                                     relation_loss=f"{avg_relation_loss:.4f}", time=f"{elapsed_time:.2f}s",
+                                     eta=f"{eta:.2f}s")
+
+        model.no_pairs_count = 0
+        model.no_results_count = 0
+
         if tensorboard_writer is not None:
             global_step = epoch * num_batches + batch_idx
-            tensorboard_writer.add_scalar('train_total_loss', loss.item(), global_step=global_step)  # 修改，记录总损失到Tensorboard
-            tensorboard_writer.add_scalar('train_binary_loss', binary_loss.item(), global_step=global_step)  # 修改，记录二分类损失到Tensorboard
-            tensorboard_writer.add_scalar('train_relation_loss', relation_loss.item(), global_step=global_step)  # 修改，记录多分类损失到Tensorboard
+            tensorboard_writer.add_scalar('train_total_loss', loss.item(), global_step=global_step)
+            tensorboard_writer.add_scalar('train_binary_loss', binary_loss.item(), global_step=global_step)
+            tensorboard_writer.add_scalar('train_relation_loss', relation_loss.item(), global_step=global_step)
 
     if (batch_idx + 1) % accumulation_steps != 0 and has_non_zero_loss:
-        scaler.unscale_(optimizer)  # 取消缩放
-        total_norm = clip_grad_norm_(model.parameters(), grad_clip_val)  # 计算梯度模并进行裁剪
+        if grad_clip_val > 0:
+            accelerator.clip_grad_norm_(model.parameters(), grad_clip_val)
 
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.step()
         optimizer.zero_grad()
-        if tensorboard_writer is not None:
-            global_step = epoch * num_batches + batch_idx
-            tensorboard_writer.add_scalar('grad_norm', total_norm, global_step)  # 将梯度模写入TensorBoard
         if args.schedule == "linear_with_warmup":
             lr_scheduler.step()
     if args.schedule == "multistep":
         lr_scheduler.step()
-    # if lr_scheduler is not None:
-    #     lr_scheduler.step(epoch_loss  / num_batches)  # 根据当前 epoch 的平均损失更新学习率
-    # 打印训练总时间
+
     elapsed_time = time.time() - start_time
-    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss  / num_batches:.4f}. Average relation loss: {epoch_relation_loss  / num_batches:.4f}. Average binary loss: {epoch_binary_loss  / num_batches:.4f}")
-    # print("forward_total_time: ", forward_total_time)
+    print(
+        f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss / num_batches:.4f}. Average relation loss: {epoch_relation_loss / num_batches:.4f}. Average binary loss: {epoch_binary_loss / num_batches:.4f}")
+
     no_pairs_ratio = no_pairs_batches / num_batches
     no_results_ratio = no_results_images / total_images
-    
-    # subject_label_mismatch_ratio = subject_label_mismatches / total_pairs if total_pairs else 0
-    # object_label_mismatch_ratio = object_label_mismatches / total_pairs if total_pairs else 0
-    # subject_box_mismatch_ratio = subject_box_mismatches / total_pairs if total_pairs else 0
-    # object_box_mismatch_ratio = object_box_mismatches / total_pairs if total_pairs else 0
-    
+
     print(f"No pairs found ratio: {no_pairs_ratio:.4f}")
     print(f"No results found ratio: {no_results_ratio:.4f}")
-    
-    # print(f"Subject label mismatch ratio: {subject_label_mismatch_ratio:.4f}")
-    # print(f"Object label mismatch ratio: {object_label_mismatch_ratio:.4f}")
-    # print(f"Subject box mismatch ratio: {subject_box_mismatch_ratio:.4f}")
-    # print(f"Object box mismatch ratio: {object_box_mismatch_ratio:.4f}")
 
     if tensorboard_writer is not None:
         tensorboard_writer.add_scalar('no_pairs_ratio', no_pairs_ratio, epoch)
         tensorboard_writer.add_scalar('no_results_ratio', no_results_ratio, epoch)
-        
-        # tensorboard_writer.add_scalar('subject_label_mismatch_ratio', subject_label_mismatch_ratio, epoch)
-        # tensorboard_writer.add_scalar('object_label_mismatch_ratio', object_label_mismatch_ratio, epoch)
-        # tensorboard_writer.add_scalar('subject_box_mismatch_ratio', subject_box_mismatch_ratio, epoch)
-        # tensorboard_writer.add_scalar('object_box_mismatch_ratio', object_box_mismatch_ratio, epoch)
-    return epoch_loss / num_batches, epoch_relation_loss / num_batches, epoch_binary_loss  / num_batches
+
+    return epoch_loss / num_batches, epoch_relation_loss / num_batches, epoch_binary_loss / num_batches
 
 
 @torch.no_grad()

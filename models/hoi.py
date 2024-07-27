@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.tensorboard.summary import image
+
 from util.misc import NestedTensor
 import time
 import torch
@@ -307,6 +309,8 @@ class HOIModel(nn.Module):
         # print("image size", images.size())
         mask = nested_tensor.mask
         batch_size = images.size(0)
+        # dtype = torch.bfloat16
+        # images = images.to(dtype)
 
         batch_denoised_features, raw_features, CLS_token = self.backbone(images)
         # print("batch_denoised_features: ", batch_denoised_features.shape)

@@ -106,7 +106,7 @@ class ViTWrapper(nn.Module):
                 num_classes=num_classes,
                 dynamic_img_size=self.dynamic_img_size,
                 dynamic_img_pad=self.dynamic_img_pad,
-                pretrained_cfg_overlay=dict(file=f"feature_map_visualize/checkpoints/feat_visualize_models/{model_type}.bin"),
+                pretrained_cfg_overlay=dict(file=f"/pfs/mt-BzjfJP/jj/proj/relation/{model_type}.bin"),
                 **kwargs,
             )
         except:
@@ -115,7 +115,7 @@ class ViTWrapper(nn.Module):
                 model_type,
                 pretrained=True,
                 num_classes=num_classes,
-                pretrained_cfg_overlay=dict(file=f"/bd_byta6000i0/users/dataset/feat_visualize_models/{model_type}.bin"),
+                pretrained_cfg_overlay=dict(file=f"/pfs/mt-BzjfJP/jj/proj/relation/{model_type}.bin"),
                 **kwargs,
             )
         data_config = timm.data.resolve_model_data_config(model)

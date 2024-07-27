@@ -28,7 +28,7 @@ from sklearn.model_selection import KFold
 import copy
 from transformers import get_linear_schedule_with_warmup
 from torch.optim.lr_scheduler import MultiStepLR
-
+from accelerate import Accelerator
 # from ultralytics import YOLO
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
@@ -551,6 +551,7 @@ def main(args):
     
     # print(backbone)
     model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention)
+    print(f"---------model dtype: {next(model.parameters()).dtype}")
     # model = backbone_time(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
     matcher = HungarianMatcherHOI_det(
         device=device,
@@ -652,7 +653,7 @@ def main(args):
             # excluded_indices = {43, 47, 49, 56, 57, 59}
             # subset_indices = [i for i in range(2 * args.subset_size, min(3 * args.subset_size, len(dataset_train))) if i not in excluded_indices]
             # subset_indices = list(range(2*args.subset_size, min(3 * args.subset_size, len(dataset_train))))
-        print("subset_indices: ", subset_indices)
+        # print("subset_indices: ", subset_indices)
         dataset_train = CustomSubset(dataset_train, subset_indices)
         dataset_val = CustomSubset(dataset_val, subset_indices)
         
@@ -685,64 +686,68 @@ def main(args):
     #     print("it is here val!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
     #     sampler_val = DistributedSampler(dataset_val, shuffle=False)
     # else:
-    if args.do_cross_validation:
-        # 使用交叉验证
-        kf = KFold(n_splits=args.num_folds, shuffle=True, random_state=42)
-        results1 = []
-        results2 = []
-
-        for fold, (train_idx, val_idx) in enumerate(kf.split(dataset_train)):
-            train_subset = CustomSubset(dataset_train, train_idx)
-            val_subset1 = CustomSubset(dataset_val, val_idx)
-            val_subset2 = CustomSubset(dataset_val, train_idx)
-            
-            sampler_train = torch.utils.data.RandomSampler(train_subset)
-            batch_sampler_train = torch.utils.data.BatchSampler(
-                sampler_train, args.batch_size, drop_last=True)
-            
-            train_loader = DataLoader(train_subset, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
-            
-            sampler_val1 = torch.utils.data.SequentialSampler(val_subset1)
-            val_loader1 = DataLoader(val_subset1, args.batch_size, sampler=sampler_val1,
-                        drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-            sampler_val2 = torch.utils.data.SequentialSampler(val_subset2)
-            val_loader2 = DataLoader(val_subset2, args.batch_size, sampler=sampler_val2,
-                        drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-
-            # 重新初始化模型和优化器以避免泄露前一轮的信息
-            model = HOIModel(backbone, device=device)
-            matcher = HungarianMatcherHOI_det(
-                device=device,
-                cost_obj_class=args.set_cost_obj_class,
-                cost_verb_class=args.set_cost_verb_class,
-                cost_bbox=args.set_cost_bbox,
-                cost_giou=args.set_cost_giou
-            )
-            criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
-            optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
-                                        weight_decay=args.weight_decay)
-            postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
-
-            print(f"Starting fold {fold+1}/{args.num_folds}")
-            for epoch in range(args.epochs):
-                train_loss = train_one_epoch(model, criterion, optimizer, train_loader, device, epoch)
-                # 这里可以添加验证逻辑和TensorBoard记录
-
-            # 评估这个折叠
-            test_stats1 = evaluate_hoi(args.dataset_file, model, postprocessors, val_loader1, args.subject_category_id, device, args)
-            test_stats2 = evaluate_hoi(args.dataset_file, model, postprocessors, val_loader2, args.subject_category_id, device, args)
-            results1.append(test_stats1['mAP'])
-            results2.append(test_stats2['mAP'])
-            
-            print(f"Fold {fold+1} mAP val: {test_stats1['mAP']}")
-            print(f"Fold {fold+1} mAP train: {test_stats2['mAP']}")
-
-        print("Cross-validation val results:", results1)
-        print("Mean AP across val folds:", np.mean(results1))
-        
-        print("Cross-validation train results:", results2)
-        print("Mean AP across train folds:", np.mean(results2))
+    if False:
+        pass
+    # if args.do_cross_validation:
+        # # 使用交叉验证
+        # kf = KFold(n_splits=args.num_folds, shuffle=True, random_state=42)
+        # results1 = []
+        # results2 = []
+        #
+        # for fold, (train_idx, val_idx) in enumerate(kf.split(dataset_train)):
+        #     train_subset = CustomSubset(dataset_train, train_idx)
+        #     val_subset1 = CustomSubset(dataset_val, val_idx)
+        #     val_subset2 = CustomSubset(dataset_val, train_idx)
+        #
+        #     sampler_train = torch.utils.data.RandomSampler(train_subset)
+        #     batch_sampler_train = torch.utils.data.BatchSampler(
+        #         sampler_train, args.batch_size, drop_last=True)
+        #
+        #     train_loader = DataLoader(train_subset, batch_sampler=batch_sampler_train,
+        #                            collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        #
+        #     sampler_val1 = torch.utils.data.SequentialSampler(val_subset1)
+        #     val_loader1 = DataLoader(val_subset1, args.batch_size, sampler=sampler_val1,
+        #                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        #     sampler_val2 = torch.utils.data.SequentialSampler(val_subset2)
+        #     val_loader2 = DataLoader(val_subset2, args.batch_size, sampler=sampler_val2,
+        #                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+        #
+        #     # 重新初始化模型和优化器以避免泄露前一轮的信息
+        #     model = HOIModel(backbone, device=device)
+        #     matcher = HungarianMatcherHOI_det(
+        #         device=device,
+        #         cost_obj_class=args.set_cost_obj_class,
+        #         cost_verb_class=args.set_cost_verb_class,
+        #         cost_bbox=args.set_cost_bbox,
+        #         cost_giou=args.set_cost_giou
+        #     )
+        #     criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
+        #     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
+        #                                 weight_decay=args.weight_decay)
+        #     postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
+        #
+        #     print(f"Starting fold {fold+1}/{args.num_folds}")
+        #
+        #
+        #     for epoch in range(args.epochs):
+        #         train_loss = train_one_epoch(model, criterion, optimizer, train_loader, device, epoch)
+        #         # 这里可以添加验证逻辑和TensorBoard记录
+        #
+        #     # 评估这个折叠
+        #     test_stats1 = evaluate_hoi(args.dataset_file, model, postprocessors, val_loader1, args.subject_category_id, device, args)
+        #     test_stats2 = evaluate_hoi(args.dataset_file, model, postprocessors, val_loader2, args.subject_category_id, device, args)
+        #     results1.append(test_stats1['mAP'])
+        #     results2.append(test_stats2['mAP'])
+        #
+        #     print(f"Fold {fold+1} mAP val: {test_stats1['mAP']}")
+        #     print(f"Fold {fold+1} mAP train: {test_stats2['mAP']}")
+        #
+        # print("Cross-validation val results:", results1)
+        # print("Mean AP across val folds:", np.mean(results1))
+        #
+        # print("Cross-validation train results:", results2)
+        # print("Mean AP across train folds:", np.mean(results2))
     else:
         if args.output_dir:
             ensure_dir(args.output_dir)
@@ -757,6 +762,7 @@ def main(args):
         num_epochs = args.epochs
         lr_scheduler =None
         if args.schedule == "linear_with_warmup":
+        # if True:
             # 计算总的训练步骤数
             total_steps = len(data_loader_train) * num_epochs // args.accumulation_steps
             warmup_steps = total_steps // 10  # 例如，使用总步骤数的10%作为warmup
@@ -765,15 +771,26 @@ def main(args):
             milestones = [int(0.2 * num_epochs), int(0.4 * num_epochs), int(0.6 * num_epochs)]
             gamma = 0.1
             lr_scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
-        print("lr_scheduler: ", lr_scheduler)
+
         best_loss = float('inf')
         best_epoch = -1
         best_map = 0
         start_time = time.time()
         train_loss = 0
+        accelerator = Accelerator()
+
+        model, data_loader_train, optimizer, lr_scheduler = accelerator.prepare(model, data_loader_train, optimizer, lr_scheduler)
+
         for epoch in range(num_epochs):
+            train_loss, relation_loss, binary_loss = train_one_epoch(accelerator, model, criterion, optimizer,
+                                                                     data_loader_train, epoch,
+                                                                     lr_scheduler=lr_scheduler,
+                                                                     accumulation_steps=args.accumulation_steps,
+                                                                     grad_clip_val=args.clip_max_norm,
+                                                                     tensorboard_writer=tensorboard_writer, args=args)
             try:
-                train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
+                ################# here
+                train_loss, relation_loss, binary_loss = train_one_epoch(accelerator, model, criterion, optimizer, data_loader_train, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
             except Exception as e:
                 print(f"Error encountered during training at epoch {epoch}: {e}")
                 state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}

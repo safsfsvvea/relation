@@ -1,0 +1,34 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: no
+downcast_bf16: 'no'
+gpu_ids: "0"
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: 1
+rdzv_backend: static
+same_network: true
+use_cpu: false
+main_process_port: 29502
+deepspeed_config:
+  zero_optimization:
+    stage: 2
+    offload_optimizer:
+      device: 'cpu'
+      pin_memory: True
+#    allgather_partitions: True
+#    allgather_bucket_size: 2e8
+#    overlap_comm: True
+#    reduce_scatter: True
+#    reduce_bucket_size: 2e8
+#    contiguous_gradients: True
+  train_batch_size: 32
+#  train_micro_batch_size_per_gpu: 4
+#  gradient_accumulation_steps: 1
+  gradient_clipping: 1.0
+#  fp16:
+#    enabled: false
+#  bf16:
+#    enabled: true
