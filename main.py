@@ -28,7 +28,9 @@ from sklearn.model_selection import KFold
 import copy
 from transformers import get_linear_schedule_with_warmup
 from torch.optim.lr_scheduler import MultiStepLR
-
+from accelerate import Accelerator
+import deepspeed
+from torch.nn.parallel import DistributedDataParallel as DDP
 # from ultralytics import YOLO
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
@@ -37,7 +39,7 @@ def get_args_parser():
     parser.add_argument('--lr_backbone', default=0, type=float) #1e-5
     parser.add_argument('--text_encoder_lr', default=5e-5, type=float)
     parser.add_argument('--batch_size', default=4, type=int)
-    parser.add_argument('--accumulation_steps', default=32, type=int)
+    parser.add_argument('--accumulation_steps', default=16, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=150, type=int)
     parser.add_argument('--lr_drop', default=100, type=int)
@@ -537,7 +539,10 @@ def ensure_dir(directory):
         os.makedirs(directory)
 
 def main(args):
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    accelerator = Accelerator(gradient_accumulation_steps=args.accumulation_steps, mixed_precision="bf16")
+    # print(f"Using DeepSpeed config: {accelerator.state.deepspeed_plugin.deepspeed_config}")
+    device = accelerator.device
+    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     args.device = device
     train_backbone = False
     if args.lr_backbone > 0:
@@ -551,6 +556,7 @@ def main(args):
     
     # print(backbone)
     model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention)
+    model = DDP(model, find_unused_parameters=True)
     # model = backbone_time(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
     matcher = HungarianMatcherHOI_det(
         device=device,
@@ -744,16 +750,6 @@ def main(args):
         print("Cross-validation train results:", results2)
         print("Mean AP across train folds:", np.mean(results2))
     else:
-        if args.output_dir:
-            ensure_dir(args.output_dir)
-        if args.hoi and args.eval:
-            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
-            return
-        if args.hoi and args.eval_single:
-            test_stats = evaluate_hoi_single(model, postprocessors, data_loader_val, args.subject_category_id, device, args, threshold=0.5)
-            return
-        
-        tensorboard_writer = SummaryWriter(log_dir=args.log_dir)
         num_epochs = args.epochs
         lr_scheduler =None
         if args.schedule == "linear_with_warmup":
@@ -765,7 +761,22 @@ def main(args):
             milestones = [int(0.2 * num_epochs), int(0.4 * num_epochs), int(0.6 * num_epochs)]
             gamma = 0.1
             lr_scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+        model, optimizer, lr_scheduler, data_loader_train, data_loader_val = accelerator.prepare(
+        model, optimizer, lr_scheduler, data_loader_train, data_loader_val
+    )
         print("lr_scheduler: ", lr_scheduler)
+        
+        if args.output_dir:
+            ensure_dir(args.output_dir)
+        if args.hoi and args.eval:
+            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
+            return
+        if args.hoi and args.eval_single:
+            test_stats = evaluate_hoi_single(model, postprocessors, data_loader_val, args.subject_category_id, device, args, threshold=0.5)
+            return
+        
+        tensorboard_writer = SummaryWriter(log_dir=args.log_dir)
+        
         best_loss = float('inf')
         best_epoch = -1
         best_map = 0
@@ -773,7 +784,7 @@ def main(args):
         train_loss = 0
         for epoch in range(num_epochs):
             try:
-                train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
+                train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, accelerator, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
             except Exception as e:
                 print(f"Error encountered during training at epoch {epoch}: {e}")
                 state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
