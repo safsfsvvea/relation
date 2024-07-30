@@ -32,6 +32,7 @@ from accelerate import Accelerator
 import deepspeed
 from torch.nn.parallel import DistributedDataParallel as DDP
 # from ultralytics import YOLO
+os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
@@ -556,7 +557,7 @@ def main(args):
     
     # print(backbone)
     model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention)
-    model = DDP(model, find_unused_parameters=True)
+    # model = DDP(model, find_unused_parameters=True)
     # model = backbone_time(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
     matcher = HungarianMatcherHOI_det(
         device=device,

@@ -3,7 +3,7 @@ debug: true
 deepspeed_config:
   deepspeed_config_file: /bd_targaryen/users/clin/relation/config/deepspeed_config.json
   zero3_init_flag: false
-distributed_type: MULTI_GPU
+distributed_type: No
 downcast_bf16: 'no'
 enable_cpu_affinity: false
 machine_rank: 0

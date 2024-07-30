@@ -412,7 +412,8 @@ def train_backbone_time(model, criterion, optimizer, data_loader, device, epoch,
 def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, device, epoch, lr_scheduler=None, print_freq=100, accumulation_steps=16, grad_clip_val=1.0, tensorboard_writer=None, args=None):
     # TODO: 优化成RLIP的样子
     model.train()
-    model.module.module.backbone.eval()
+    # model.module.backbone.eval()
+    model.backbone.eval()
     
     start_time = time.time()
     
@@ -433,7 +434,6 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
     progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}", mininterval=1.0)
     
     optimizer.zero_grad()
-    has_non_zero_loss = False  # 标志位，跟踪是否有非零损失的累积
 
     # debug
     # input = []
@@ -456,8 +456,6 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
                     loss = relation_loss + binary_loss * 0.1
                 if loss > 0:
                     accelerator.backward(loss)
-
-                    has_non_zero_loss = True  # 设置标志位
                     
                     total_norm = accelerator.clip_grad_norm_(model.parameters(), grad_clip_val)  # 计算梯度模并进行裁剪
                     
@@ -477,8 +475,10 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
             epoch_relation_loss += relation_loss.item()  # 修改，记录多分类损失
             epoch_loss += loss.item()
             
-            no_pairs_batches += model.module.module.no_pairs_count
-            no_results_images += model.module.module.no_results_count
+            # no_pairs_batches += model.module.no_pairs_count
+            # no_results_images += model.module.no_results_count
+            no_pairs_batches += model.no_pairs_count
+            no_results_images += model.no_results_count
             total_images += len(targets)  # 更新总的图片数量
             
             # subject_label_mismatches += criterion.subject_label_mismatch
@@ -495,8 +495,10 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
                 eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
                 progress_bar.set_postfix(total_loss=f"{avg_loss:.4f}", binary_loss=f"{avg_binary_loss:.4f}", relation_loss=f"{avg_relation_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")  # 修改，显示二分类和多分类损失
             
-            model.module.module.no_pairs_count = 0  # 重置计数器
-            model.module.module.no_results_count = 0  # 重置计数器
+            # model.module.no_pairs_count = 0  # 重置计数器
+            # model.module.no_results_count = 0  # 重置计数器
+            model.no_pairs_count = 0  # 重置计数器
+            model.no_results_count = 0  # 重置计数器
             
             # criterion.subject_label_mismatch = 0
             # criterion.object_label_mismatch = 0
