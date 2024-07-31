@@ -455,7 +455,7 @@ class HOIModel(nn.Module):
                     positive_logits = self.positive_negative_mlp(all_pairs_tensor)
                     for i, logit in enumerate(positive_logits):
                         hoi_results[i]['binary_score'] = logit
-                relation_scores = self.mlp(all_pairs_tensor).detach()
+                relation_scores = self.mlp(all_pairs_tensor)
                 for i, score in enumerate(relation_scores):
                     hoi_results[i]['relation_score'] = score
             else:
