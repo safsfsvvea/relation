@@ -646,12 +646,12 @@ def main(args):
             print("args.index here!!!")
             subset_indices = [args.index]
         else:
-            subset_indices = list(range(min(args.subset_size, len(dataset_train))))
+            # subset_indices = list(range(min(args.subset_size, len(dataset_train))))
             # subset_indices = [42, 49]
             # subset_indices = [43, 49, 56, 57]
             # excluded_indices = {43, 47, 49, 56, 57, 59}
             # subset_indices = [i for i in range(2 * args.subset_size, min(3 * args.subset_size, len(dataset_train))) if i not in excluded_indices]
-            # subset_indices = list(range(2*args.subset_size, min(3 * args.subset_size, len(dataset_train))))
+            subset_indices = list(range(2*args.subset_size, min(3 * args.subset_size, len(dataset_train))))
         print("subset_indices: ", subset_indices)
         dataset_train = CustomSubset(dataset_train, subset_indices)
         dataset_val = CustomSubset(dataset_val, subset_indices)
