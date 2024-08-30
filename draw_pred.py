@@ -21,14 +21,13 @@ def visualize_gt_and_pred(info, output_dir):
     fig, ax = plt.subplots(1, figsize=(12, 9))
     ax.imshow(image)
 
-    # Draw GT bboxes and labels
-    gt_boxes = gt['boxes']
-    gt_labels = gt['labels']
-    for bbox, label in zip(gt_boxes, gt_labels):
-        print("bbox: ", bbox)
-        print("label: ", label)
-        draw_bbox(ax, bbox, f'GT: {label}', 'green')
-
+    # Draw predict bboxes and labels
+    pred_boxes = pred['boxes']
+    pred_labels = pred['labels']
+    for bbox, label in zip(pred_boxes, pred_labels):
+        # print("bbox: ", bbox)
+        # print("label: ", label)
+        draw_bbox(ax, bbox, f'pred: {label}', 'red')
     # # Draw HOI information
     # gt_hois = gt['hois']
     # for hoi in gt_hois:
@@ -63,6 +62,6 @@ def load_and_visualize(json_file, output_dir):
         break
 
 # Example usage
-json_file = '/bd_targaryen/users/clin/relation/results/test_single/low_mAP_info.json'
-output_dir = '/bd_targaryen/users/clin/relation/results/test_single/test'
+json_file = '/bd_targaryen/users/clin/relation/results/test_single_64_nms/low_mAP_info.json'
+output_dir = '/bd_targaryen/users/clin/relation/results/test_single_64_nms/pred'
 load_and_visualize(json_file, output_dir)

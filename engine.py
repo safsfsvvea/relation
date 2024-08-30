@@ -711,7 +711,8 @@ def evaluate_hoi_single(model, postprocessors, data_loader, subject_category_id,
         evaluator = HICOEvaluator(preds, gts, subject_category_id, data_loader.dataset.rare_triplets,
                                   data_loader.dataset.non_rare_triplets, data_loader.dataset.correct_mat, args)
         stats = evaluator.evaluate()
-        
+        print("gts[0]: ", gts[0]) 
+        threshold = 1
         # Check mAP and save low mAP info
         if stats['mAP'] < threshold:
             log_info = {

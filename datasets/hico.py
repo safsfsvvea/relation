@@ -22,6 +22,7 @@ from util.image import draw_umich_gaussian, gaussian_radius
 import torch
 import torch.utils.data
 import torchvision
+import torchvision.ops as ops
 from typing import List
 
 import datasets.transforms as T
@@ -390,6 +391,11 @@ class HICODetection_det(torch.utils.data.Dataset):
             detection['labels'] = detection['labels'][keep_det]
             detection['scores'] = detection['scores'][keep_det]
             
+            # # perform nms for boxes to remove redundant boxes of the same objects
+            # keep_indices = ops.nms(detection['boxes'], detection['scores'], self.thres_nms)
+            # detection['boxes'] = detection['boxes'][keep_indices]
+            # detection['labels'] = detection['labels'][keep_indices]
+            
             # construct target dict
             target['boxes'] = boxes
             target['labels'] = classes  # like [[0, 0][1, 56][2, 0][3, 0]...]
@@ -597,6 +603,8 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
     def __init__(self, img_set, img_folder, anno_file, detection_results, transforms, num_queries, args = None):
         self.img_set = img_set
         self.img_folder = img_folder
+        self.thres_nms = args.thres_nms
+        print("thres_nms: ", self.thres_nms)
         with open(anno_file, 'r') as f:
             self.annotations = json.load(f)
             
@@ -688,7 +696,8 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         else:
             classes = [self._valid_obj_ids.index(obj['category_id']) for obj in img_anno['annotations']]
         classes = torch.tensor(classes, dtype=torch.int64)
-
+        classes = torch.tensor(classes, dtype=torch.int64)
+        print("classes: ", classes)
         target = {}
         target['orig_size'] = torch.as_tensor([int(h), int(w)])
         target['size'] = torch.as_tensor([int(h), int(w)])
@@ -709,12 +718,22 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
             detection['labels'] = detection['labels'][keep_det]
             detection['scores'] = detection['scores'][keep_det]
             
+            # perform nms for boxes to remove redundant boxes of the same objects
+            scores = torch.ones(len(boxes))
+            keep_indices = ops.nms(boxes, scores, self.thres_nms)
+            boxes_keep = boxes[keep_indices]
+            classes_keep = classes[keep_indices]
+            # print("classes: ", classes)
+            # print("classes_keep: ", classes_keep)
             # construct target dict
             target['boxes'] = boxes
             target['labels'] = classes  # like [[0, 0][1, 56][2, 0][3, 0]...]
             target['iscrowd'] = torch.tensor([0 for _ in range(boxes.shape[0])])
             target['area'] = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-
+            
+            # target1 = copy.deepcopy(target)
+            # target1['boxes'] = boxes_keep 
+            # target1['labels'] = classes_keep
             if self._transforms is not None:
                 img, target, detection = self._transforms(img, target, detection)
                 # print(img.shape)
@@ -772,14 +791,28 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
             target1 = copy.deepcopy(target)
                 
         else:
+            # perform nms for boxes to remove redundant boxes of the same objects
+            # print("-----------------------------")
+            # print("boxes before: ", boxes)
+            # print("classes before: ", classes)
+            scores = torch.ones(len(boxes))
+            keep_indices = ops.nms(boxes, scores, self.thres_nms)
+            # print("keep_indices: ", keep_indices)
+            boxes_keep = boxes[keep_indices]
+            classes_keep = classes[keep_indices]
+            # print("boxes after: ", boxes_keep)
+            # print("class after: ", classes_keep)
             target['filename'] = img_anno['file_name']
-            target['boxes'] = boxes # 
+            target['boxes'] = boxes #
+            # target['boxes_keep'] = boxes_keep 
             target['labels'] = classes # 
             target['id'] = idx # img_idx
             
             target1 = copy.deepcopy(target)
+            target1['boxes'] = boxes_keep 
+            target1['labels'] = classes_keep
             if self._transforms is not None:
-                img, target1, detection = self._transforms(img, target, detection)
+                img, target1, detection = self._transforms(img, target1, detection)
 
             hois = []
             for hoi in img_anno['hoi_annotation']:
@@ -791,17 +824,9 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         if not (target['labels'] < 80).all():
             raise ValueError("target labels should be less than or equal to 80.")
         
-        # if 'labels' not in target1:
-            # print("target1: ", target1)
-            # print("target: ", target)
         target1['scores'] = torch.ones((target1['labels'].shape[0],), dtype=torch.float32)
-        # print("target['scores']: ", target['scores'])
-        # print("target['scores'] shape: ", target['scores'].shape)
+        
         target1['labels'] = target1['labels'] + 1
-        # print("target1['labels']: ", target1['labels'])
-        # print("target1['labels'] shape: ", target1['labels'].shape)
-        # print("target['labels']: ", target['labels'])
-        # print("target['labels'] shape: ", target['labels'].shape)
         rois_tensor, additional_info, detection_counts = self.prepare_rois(target1)
         return img, target, rois_tensor, additional_info, detection_counts, target1
     
