@@ -75,8 +75,8 @@ class Denoiser(nn.Module):
     def forward(
         self,
         x: Tensor,
-        return_prefix_tokens=False,
-        return_class_token=False,
+        return_prefix_tokens=True,
+        return_class_token=True,
         norm=True,
         return_dict=True,
         return_channel_first=False,

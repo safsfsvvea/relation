@@ -10,9 +10,10 @@ import concurrent.futures
 import torch.profiler
 from util.box_ops import box_cxcywh_to_xyxy
 from torchvision.ops import box_iou
+from models.position_encoding import PositionEmbeddingSine, PositionEmbeddingSineHW
 
 class HOIModel(nn.Module):
-    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1, denoised=True, position_encoding_type=None, use_attention=True, use_CLS=True, roi_size=7, use_self_attention=True):
         super(HOIModel, self).__init__()
         self.backbone = backbone
         self.device = device
@@ -26,111 +27,125 @@ class HOIModel(nn.Module):
         self.num_category = 117 if not add_negative_category else 118
         self.topK = topK
         self.positive_negative = positive_negative
-        self.attention = BidirectionalCrossAttentionStack(embed_dim=feature_dim, num_heads=num_heads, num_layers=num_layers, dropout=dropout)
-        print("num_heads: ", num_heads)
-        print("num_layers: ", num_layers)
-        print("dropout: ", dropout)
-        if not use_LN:
+        self.denoised = denoised
+        self.position_encoding = None
+        self.use_CLS = use_CLS
+        self.roi_size= roi_size
+        self.use_self_attention = use_self_attention
+        if use_attention:
+            if use_CLS or self.use_self_attention:
+                self.attention = MultiheadAttentionStack(embed_dim=feature_dim, num_heads=num_heads, num_layers=num_layers, dropout=dropout)
+            else:
+                self.attention = BidirectionalCrossAttentionStack(embed_dim=feature_dim, num_heads=num_heads, num_layers=num_layers, dropout=dropout)
+            if position_encoding_type == 'default':
+                self.position_encoding = PositionEmbeddingSine(num_pos_feats=feature_dim // 2)
+            elif position_encoding_type == 'HW':
+                self.position_encoding = PositionEmbeddingSineHW(num_pos_feats=feature_dim // 2)
             self.mlp = nn.Sequential(
                 nn.Linear(feature_dim, 256),
                 nn.ReLU(),
-                # nn.LayerNorm(256),  # 添加 Layer Normalization
-                nn.Dropout(dropout),  # 添加 Dropout
+                nn.Dropout(dropout), 
                 nn.Linear(256, self.num_category)
             )
-            # self.mlp = nn.Sequential(
-            #     nn.Linear(2 * feature_dim, 1024),
-            #     nn.ReLU(),
-            #     # nn.Dropout(p=0.5),  
-            #     nn.Linear(1024, 512),
-            #     nn.ReLU(),
-            #     # nn.Dropout(p=0.5),  
-            #     nn.Linear(512, 256),
-            #     nn.ReLU(),
-            #     # nn.Dropout(p=0.5),  
-            #     nn.Linear(256, 128),
-            #     nn.ReLU(),
-            #     # nn.Dropout(p=0.5),  
-            #     nn.Linear(128, 64),
-            #     nn.ReLU(),
-            #     # nn.Dropout(p=0.5), 
-            #     nn.Linear(64, self.num_category)  
-            # )
-            if self.positive_negative:
-                self.positive_negative_mlp = nn.Sequential(
+        else:
+            self.attention = None      
+            if not use_LN:
+                self.mlp = nn.Sequential(
                     nn.Linear(2 * feature_dim, 1024),
                     nn.ReLU(),
-                    # nn.Dropout(p=0.5),  
+                    nn.Dropout(dropout),  
                     nn.Linear(1024, 512),
                     nn.ReLU(),
-                    # nn.Dropout(p=0.5),  
+                    nn.Dropout(dropout),  
                     nn.Linear(512, 256),
                     nn.ReLU(),
-                    # nn.Dropout(p=0.5),  
+                    nn.Dropout(dropout),  
                     nn.Linear(256, 128),
                     nn.ReLU(),
-                    # nn.Dropout(p=0.5),  
+                    nn.Dropout(dropout),  
                     nn.Linear(128, 64),
                     nn.ReLU(),
-                    # nn.Dropout(p=0.5), 
-                    nn.Linear(64, 2)  
+                    nn.Dropout(dropout), 
+                    nn.Linear(64, self.num_category)  
                 )
-        else:
-            print("use LN")
-            if self.positive_negative:
-                self.positive_negative_mlp = nn.Sequential(
+                if self.positive_negative:
+                    self.positive_negative_mlp = nn.Sequential(
+                        nn.Linear(2 * feature_dim, 1024),
+                        nn.ReLU(),
+                        nn.Dropout(dropout),   
+                        nn.Linear(1024, 512),
+                        nn.ReLU(),
+                        nn.Dropout(dropout),   
+                        nn.Linear(512, 256),
+                        nn.ReLU(),
+                        nn.Dropout(dropout), 
+                        nn.Linear(256, 128),
+                        nn.ReLU(),
+                        nn.Dropout(dropout),   
+                        nn.Linear(128, 64),
+                        nn.ReLU(),
+                        nn.Dropout(dropout), 
+                        nn.Linear(64, 2)  
+                    )
+            else:
+                print("use LN")
+                if self.positive_negative:
+                    self.positive_negative_mlp = nn.Sequential(
+                        nn.Linear(2 * feature_dim, 1024),
+                        nn.LayerNorm(1024),  
+                        nn.ReLU(),
+                        nn.Dropout(dropout), 
+                        nn.Linear(1024, 512),
+                        nn.LayerNorm(512),  
+                        nn.ReLU(),
+                        nn.Dropout(dropout), 
+                        nn.Linear(512, 256),
+                        nn.LayerNorm(256),  
+                        nn.ReLU(),
+                        nn.Dropout(dropout),   
+                        nn.Linear(256, 128),
+                        nn.LayerNorm(128),  
+                        nn.ReLU(),
+                        nn.Dropout(dropout),  
+                        nn.Linear(128, 64),
+                        nn.LayerNorm(64),  
+                        nn.ReLU(),
+                        nn.Dropout(dropout), 
+                        nn.Linear(64, 2)  
+                    )
+                self.mlp = nn.Sequential(
                     nn.Linear(2 * feature_dim, 1024),
                     nn.LayerNorm(1024),  
                     nn.ReLU(),
-                    # nn.Dropout(p=0.5),  
+                    nn.Dropout(dropout), 
                     nn.Linear(1024, 512),
                     nn.LayerNorm(512),  
                     nn.ReLU(),
-                    # nn.Dropout(p=0.5),  
+                    nn.Dropout(dropout),  
                     nn.Linear(512, 256),
                     nn.LayerNorm(256),  
                     nn.ReLU(),
-                    # nn.Dropout(p=0.5),  
+                    nn.Dropout(dropout), 
                     nn.Linear(256, 128),
                     nn.LayerNorm(128),  
                     nn.ReLU(),
-                    # nn.Dropout(p=0.5),  
+                    nn.Dropout(dropout), 
                     nn.Linear(128, 64),
                     nn.LayerNorm(64),  
                     nn.ReLU(),
-                    # nn.Dropout(p=0.5),  
-                    nn.Linear(64, 2)  
+                    nn.Dropout(dropout),  
+                    nn.Linear(64, self.num_category)  
                 )
-            self.mlp = nn.Sequential(
-                nn.Linear(feature_dim, 256),
-                nn.ReLU(),
-                nn.LayerNorm(256),  # 添加 Layer Normalization
-                nn.Dropout(dropout),  # 添加 Dropout
-                nn.Linear(256, self.num_category)
-            )
-            # self.mlp = nn.Sequential(
-            #     nn.Linear(2 * feature_dim, 1024),
-            #     nn.LayerNorm(1024),  
-            #     nn.ReLU(),
-            #     # nn.Dropout(p=0.5),  
-            #     nn.Linear(1024, 512),
-            #     nn.LayerNorm(512),  
-            #     nn.ReLU(),
-            #     # nn.Dropout(p=0.5),  
-            #     nn.Linear(512, 256),
-            #     nn.LayerNorm(256),  
-            #     nn.ReLU(),
-            #     # nn.Dropout(p=0.5),  
-            #     nn.Linear(256, 128),
-            #     nn.LayerNorm(128),  
-            #     nn.ReLU(),
-            #     # nn.Dropout(p=0.5),  
-            #     nn.Linear(128, 64),
-            #     nn.LayerNorm(64),  
-            #     nn.ReLU(),
-            #     # nn.Dropout(p=0.5),  
-            #     nn.Linear(64, self.num_category)  
-            # )
+        print("self.roi_size: ", self.roi_size)
+        print("self.use_self_attention: ", self.use_self_attention)
+        print("self.use_CLS: ", self.use_CLS)
+        print("self.attention: ", self.attention)
+        print("position_encoding_type: ", position_encoding_type)
+        print("denoised: ", denoised)
+        print("num_heads: ", num_heads)
+        print("num_layers: ", num_layers)
+        print("dropout: ", dropout)
+        
 
         self.to(self.device)
 
@@ -259,43 +274,74 @@ class HOIModel(nn.Module):
                         for label, roi, idx, score in zip(labels_tensor, rois_tensor, image_indices_tensor, scores_tensor)]
 
         return rois_tensor.float(), additional_info, detection_counts
-    def separate_pooled_features(self, pooled_features, additional_info, detection_counts):
+    def separate_pooled_features(self, pooled_features, detection_counts):
         separated_features = []
-        separated_additional_info = []
+        # separated_additional_info = []
         current_idx = 0
 
         for count in detection_counts:
             if count > 0:
                 separated_features.append(pooled_features[current_idx:current_idx + count])
-                separated_additional_info.append(additional_info[current_idx:current_idx + count])
+                # separated_additional_info.append(additional_info[current_idx:current_idx + count])
             else:
                 separated_features.append(torch.empty(0, pooled_features.size(1), pooled_features.size(2), pooled_features.size(3)))
-                separated_additional_info.append([])
+                # separated_additional_info.append([])
             current_idx += count
 
-        return separated_features, separated_additional_info
+        return separated_features
     
-    def forward(self, nested_tensor: NestedTensor, detections_batch):
+    def generate_attention_mask(self, num_human=49, num_object=49, num_cls=1):
+        total_features = num_human + num_object + num_cls
+        attn_mask = torch.zeros((total_features, total_features), dtype=torch.bool, device=self.device)
+
+        # Mask掉human内部、object内部以及cls token之间的注意力
+        attn_mask[:num_human, :num_human] = True
+        attn_mask[num_human:num_human+num_object, num_human:num_human+num_object] = True
+        if num_cls > 0:
+            attn_mask[-num_cls:, -num_cls:] = True
+
+        return attn_mask
+    
+    def forward(self, nested_tensor: NestedTensor, rois_tensor, additional_info, detection_counts):
         images = nested_tensor.tensors
         # print("image size", images.size())
         mask = nested_tensor.mask
         batch_size = images.size(0)
-        # print("detections_batch: ", detections_batch)
-        batch_denoised_features, _, scales = self.backbone(images)
 
-        batch_denoised_features = batch_denoised_features.permute(0, 3, 1, 2)
-        # print("batch_denoised_features before: ", batch_denoised_features.shape)
-        # batch_denoised_features = F.interpolate(batch_denoised_features, scale_factor=2, mode='bilinear', align_corners=True)
-        # print("batch_denoised_features after: ", batch_denoised_features.shape)
+        batch_denoised_features, raw_features, CLS_token = self.backbone(images)
+        # print("batch_denoised_features: ", batch_denoised_features.shape)
+        # print("raw_features: ", raw_features.shape)
+        if self.denoised:
+            backbone_features = batch_denoised_features
+        else:
+            backbone_features = raw_features
+        backbone_features = backbone_features.permute(0, 3, 1, 2)
         
-        rois, additional_info, detection_counts= self.prepare_rois_cpu(detections_batch)
+        # 将 mask 调整到与 backbone_features 一样的尺度
+        # mask 原始大小是 [B, H, W]，需要先增加一个维度变为 [B, 1, H, W] 以便于插值
+        mask = mask.unsqueeze(1).float()  # 增加一个维度并转换为 float 类型
 
-        output_size = (7, 7)
+        # 进行最近邻插值，将 mask 调整到与 backbone_features 一样的尺度
+        mask = F.interpolate(mask, size=backbone_features.shape[-2:], mode='nearest')
 
-        pooled_features = roi_align(batch_denoised_features, rois, output_size)
+        # 调整后的 mask 变回 [B, H', W'] 形式
+        mask = mask.squeeze(1).bool()
+        
+        nested_backbone_feature = NestedTensor(backbone_features, mask)
 
-        separated_features, separated_additional_info = self.separate_pooled_features(pooled_features, additional_info, detection_counts)
+        if self.position_encoding is not None:
+            pos_encoding = self.position_encoding(nested_backbone_feature)
+            backbone_features = backbone_features + pos_encoding
+        
+        # rois, additional_info, detection_counts= self.prepare_rois_cpu(detections_batch)
+        if self.attention is not None:
+            output_size = (self.roi_size, self.roi_size)
+        else:
+            output_size = (1, 1)
+        rois_tensor = [tensor.to(self.device) for tensor in rois_tensor]
+        pooled_features = roi_align(backbone_features, rois_tensor, output_size)
 
+        separated_features = self.separate_pooled_features(pooled_features, detection_counts)
         # 从 additional_info 中提取并区分 human 和 object 的 features
         all_pairs = []
         query_list = []
@@ -303,16 +349,19 @@ class HOIModel(nn.Module):
         pair_start_indices = []
         hoi_results = []
         current_index = 0
-        for i, (features, info) in enumerate(zip(separated_features, separated_additional_info)):
+        for i, (features, info) in enumerate(zip(separated_features, additional_info)):
             human_features = []
             object_features = []
 
             for feat, det_info in zip(features, info):
                 # print("feat size: ", feat.shape)
+                flattened_feat = feat.view(self.feature_dim, -1)  # [768, 49]
+                # if self.use_CLS:
+                #     flattened_feat = torch.cat([flattened_feat, CLS_token[i].unsqueeze(1)], dim=1)  # [768, 50]
                 if det_info['label'] == self.person_category_id:
-                    human_features.append((feat.view(self.feature_dim, -1), det_info['score'], det_info['label'], det_info['bbox']))
+                    human_features.append((flattened_feat, det_info['score'], det_info['label'], det_info['bbox']))
                 else:
-                    object_features.append((feat.view(self.feature_dim, -1), det_info['score'], det_info['label'], det_info['bbox']))
+                    object_features.append((flattened_feat, det_info['score'], det_info['label'], det_info['bbox']))
 
             # 排序并限制 human 和 object 的数量
             human_features.sort(key=lambda x: -x[1])
@@ -322,75 +371,25 @@ class HOIModel(nn.Module):
                 object_features = object_features[:self.num_objects]
             
             pair_start_indices.append(current_index)
-            # 生成所有有效的 human-object pairs
-            # print("len(human_features): ", len(human_features))
-            # print("len(object_features): ", len(object_features))
-            
-            # for human1 in human_features:
-            #     for human2 in human_features:
-            #         human_feature = human1[0]
-            #         obj_feature = human2[0]
-            #         cosine_similarity = F.cosine_similarity(human_feature.unsqueeze(0), obj_feature.unsqueeze(0))
-            #         print("human human Cosine Similarity:", cosine_similarity.item())
-            # for object1 in object_features:
-            #     for object2 in object_features:
-            #         human_feature = object1[0]
-            #         obj_feature = object2[0]
-            #         cosine_similarity = F.cosine_similarity(human_feature.unsqueeze(0), obj_feature.unsqueeze(0))
-            #         print("object object Cosine Similarity:", cosine_similarity.item())
-            
-            # if len(human_features) > 0 and len(object_features) > 0:
-            #     human_boxes = torch.tensor([human[3] for human in human_features], dtype=torch.float32)
-            #     object_boxes = torch.tensor([obj[3] for obj in object_features], dtype=torch.float32)
-
-            #     # 计算 IoU 矩阵
-            #     iou_matrix = box_iou(human_boxes, object_boxes)
-            #     # print("iou_matrix: ", iou_matrix)
-                
-            #     positive_iou_values = iou_matrix[iou_matrix >= 0].reshape(-1)
-            #     positive_indices = torch.nonzero(iou_matrix >= 0, as_tuple=False)
-
-            #     # 直接使用 topk，如果 positive_iou_values 的元素个数少于 K，torch.topk 会返回所有元素
-            #     topk_values, topk_indices_in_pos = torch.topk(positive_iou_values, min(self.topK, len(positive_iou_values)))
-            #     topk_indices = positive_indices[topk_indices_in_pos]
-
-            #     # print("topk_indices: ", topk_indices)
-
-            #     # 遍历筛选后的配对
-            #     for pair in topk_indices:
-            #         human_idx, obj_idx = pair
-            #         human = human_features[human_idx]
-            #         obj = object_features[obj_idx]
-                    
-            #         combined_feature = torch.cat([human[0], obj[0]], dim=0)
-            #         # human_feature = human[0]
-            #         # obj_feature = obj[0]
-            #         # cosine_similarity = F.cosine_similarity(human_feature.unsqueeze(0), obj_feature.unsqueeze(0))
-            #         # print("human object Cosine Similarity:", cosine_similarity.item())
-            #         all_pairs.append(combined_feature.unsqueeze(0))
-            #         hoi_results.append({
-            #             'subject_category': human[2],
-            #             'subject_score': human[1],
-            #             'subject_bbox': human[3],
-            #             'object_category': obj[2],
-            #             'object_score': obj[1],
-            #             'object_bbox': obj[3],
-            #         })
-            #         current_index += 1               
-            
             
             for human in human_features:
                 for obj in object_features:
                     # print("human[0].shape: ", human[0].shape)
                     # print("obj[0].shape: ", obj[0].shape)
-                    query_list.append(human[0].unsqueeze(1))  # [768, 49] -> [768, 1, 49]
-                    key_list.append(obj[0].unsqueeze(1))
-                    # combined_feature = torch.cat([human[0], obj[0]], dim=0)
-                    # human_feature = human[0]
-                    # obj_feature = obj[0]
-                    # cosine_similarity = F.cosine_similarity(human_feature.unsqueeze(0), obj_feature.unsqueeze(0))
-                    # print("human object Cosine Similarity:", cosine_similarity.item())
-                    # all_pairs.append(combined_feature.unsqueeze(0))
+                    if self.attention is not None:
+                        if self.use_CLS:
+                            combined_feature = torch.cat([human[0].unsqueeze(1), obj[0].unsqueeze(1), CLS_token[i].unsqueeze(1).unsqueeze(2)], dim=-1)
+                            query_list.append(combined_feature)
+                        elif self.use_self_attention:
+                            combined_feature = torch.cat([human[0].unsqueeze(1), obj[0].unsqueeze(1)], dim=-1)
+                            query_list.append(combined_feature)
+                        else:
+                            query_list.append(human[0].unsqueeze(1))  # [768, 49] -> [768, 1, 49]
+                            key_list.append(obj[0].unsqueeze(1))
+                    else:
+                        combined_feature = torch.cat([human[0].squeeze(1), obj[0].squeeze(1)], dim=0).unsqueeze(0)
+                        all_pairs.append(combined_feature)
+                    
                     hoi_results.append({
                         'subject_category': human[2],
                         'subject_score': human[1],
@@ -405,47 +404,65 @@ class HOIModel(nn.Module):
         # print("len(all_pairs): ", len(all_pairs))
         
         
-        
-        if query_list:
-            query = torch.cat(query_list, dim=1)  # [768, 1, 49] -> [768, N, 49]
-            key = torch.cat(key_list, dim=1)      # [768, 1, 49] -> [768, N, 49]
+        if self.attention is not None:
+            if query_list:
+                if self.use_CLS or self.use_self_attention:
+                    query = torch.cat(query_list, dim=1)  # [768, 1, 99] -> [768, N, 99]
+                    query = query.permute(2, 1, 0)  # [768, N, 99] -> [99, N, 768]
+                    if self.use_self_attention:
+                        attn_mask = self.generate_attention_mask(num_human=self.roi_size**2, num_object=self.roi_size**2, num_cls=0)
+                        # print("attn_mask: ", attn_mask)
+                    else:
+                        attn_mask = self.generate_attention_mask(num_human=self.roi_size**2, num_object=self.roi_size**2, num_cls=1)
+                    query_out = self.attention(query=query, key=query ,value=query, attn_mask=attn_mask)
+                else:
+                    query = torch.cat(query_list, dim=1)  # [768, 1, 49] -> [768, N, 49]
+                    key = torch.cat(key_list, dim=1)      # [768, 1, 49] -> [768, N, 49]
 
-            # 将张量转换为 [49, N, 768] 的形状
-            query = query.permute(2, 1, 0)  # [768, N, 49] -> [49, N, 768]
-            key = key.permute(2, 1, 0)      # [768, N, 49] -> [49, N, 768]
+                    # 将张量转换为 [49, N, 768] 的形状
+                    query = query.permute(2, 1, 0)  # [768, N, 49] -> [49, N, 768]
+                    key = key.permute(2, 1, 0)      # [768, N, 49] -> [49, N, 768]
 
-            # value 可以与 key 相同
-            value = key.clone()
-            # print("query.shape: ", query.shape)  # 输出: torch.Size([49, N, 768])
-            # print("key.shape: ", key.shape)      # 输出: torch.Size([49, N, 768])
-            # print("value.shape: ", value.shape)  # 输出: torch.Size([49, N, 768])
-            # all_pairs_tensor = torch.cat(all_pairs, dim=0)
-            # if self.positive_negative:
-            #     positive_logits = self.positive_negative_mlp(all_pairs_tensor)
-            #     # positive_probs = F.softmax(positive_logits, dim=-1)  # 转换为概率分布
-            #     # positive_labels = (positive_probs[:, 1] > 0.5).squeeze().bool()  # 选择正类概率大于0.5的样本
-            #     for i, logit in enumerate(positive_logits):
-            #         hoi_results[i]['binary_score'] = logit
-            query_out, key_out = self.attention(query, key ,value)
-            # print("attention_out.shape: ", attention_out.shape)
-            last_position_feature = query_out[-1, :, :]
-            relation_scores = self.mlp(last_position_feature)
-            # relation_scores = self.mlp(all_pairs_tensor)
-            for i, score in enumerate(relation_scores):
-                hoi_results[i]['relation_score'] = score
-            # positive_pairs = all_pairs_tensor[positive_labels]
-            # if positive_pairs.size(0) > 0:
-            #     relation_scores = self.mlp(positive_pairs)
-            #     if torch.isnan(relation_scores).any():
-            #         raise ValueError("NaN detected in relation_scores.")
-            #     # 保存关系分数到正样本 HOI 结果中
-            #     positive_indices = positive_labels.nonzero(as_tuple=True)[0]
-            #     for idx, score in zip(positive_indices, relation_scores):
-            #         hoi_results[idx]['relation_score'] = score
+                    # value 可以与 key 相同
+                    value = key.clone()
+                    
+                    query_out, key_out = self.attention(query, key ,value)
+
+                last_position_feature = query_out[-1, :, :]
+                relation_scores = self.mlp(last_position_feature)
+
+                for i, score in enumerate(relation_scores):
+                    hoi_results[i]['relation_score'] = score
+                if torch.isnan(relation_scores).any():
+                        print("NaN detected in relation_scores.")
+                # positive_pairs = all_pairs_tensor[positive_labels]
+                # if positive_pairs.size(0) > 0:
+                #     relation_scores = self.mlp(positive_pairs)
+                #     if torch.isnan(relation_scores).any():
+                #         raise ValueError("NaN detected in relation_scores.")
+                #     # 保存关系分数到正样本 HOI 结果中
+                #     positive_indices = positive_labels.nonzero(as_tuple=True)[0]
+                #     for idx, score in zip(positive_indices, relation_scores):
+                #         hoi_results[idx]['relation_score'] = score
+            else:
+                self.no_pairs_count += 1  # 统计 "No pairs found for this batch."
+                print("No pairs found for this batch.")
+                return [[] for _ in range(batch_size)]  # Return a list of empty lists, one per image in batch
         else:
-            self.no_pairs_count += 1  # 统计 "No pairs found for this batch."
-            print("No pairs found for this batch.")
-            return [[] for _ in range(batch_size)]  # Return a list of empty lists, one per image in batch
+            if all_pairs:
+                all_pairs_tensor = torch.cat(all_pairs, dim=0)
+                if self.positive_negative:
+                    positive_logits = self.positive_negative_mlp(all_pairs_tensor)
+                    for i, logit in enumerate(positive_logits):
+                        hoi_results[i]['binary_score'] = logit
+                relation_scores = self.mlp(all_pairs_tensor)
+                for i, score in enumerate(relation_scores):
+                    hoi_results[i]['relation_score'] = score
+            else:
+                self.no_pairs_count += 1  # 统计 "No pairs found for this batch."
+                print("No pairs found for this batch.")
+                return [[] for _ in range(batch_size)]  # Return a list of empty lists, one per image in batch
+
 
         for i, score in enumerate(relation_scores):
             hoi_results[i]['relation_score'] = score
@@ -464,6 +481,31 @@ class HOIModel(nn.Module):
             else:
                 image_hoi_results.append(hoi_results[start_idx:end_idx])
         return image_hoi_results 
+
+class backbone_time(nn.Module):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1):
+        super(backbone_time, self).__init__()
+        self.backbone = backbone
+        self.device = device
+        self.num_objects = num_objects
+        self.feature_dim = feature_dim
+        self.person_category_id = person_category_id
+        self.patch_size = patch_size
+        self.no_pairs_count = 0  # 用于统计 "No pairs found for this batch." 的计数
+        self.no_results_count = 0  # 用于统计 "No results found for this image." 的计数
+        self.iou_threshold = iou_threshold
+        self.num_category = 117 if not add_negative_category else 118
+        self.topK = topK
+        self.positive_negative = positive_negative
+    
+    def forward(self, nested_tensor: NestedTensor, rois_tensor, additional_info, detection_counts):
+        images = nested_tensor.tensors
+        # print("image device: ", images.device)
+        # print("image size", images.size())
+        mask = nested_tensor.mask
+        batch_size = images.size(0)
+        batch_denoised_features, _, scales = self.backbone(images)
+        return batch_denoised_features
     
 class MultiheadAttentionBlock(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout=0.1):
@@ -628,6 +670,8 @@ class CriterionHOI(nn.Module):
         self.gamma = gamma
         self.loss_type = loss_type
         print("loss type: ", self.loss_type)
+        print("self.alpha: ", self.alpha)
+        print("self.gamma: ", self.gamma)
         # 初始化不匹配计数器
         self.subject_label_mismatch = 0
         self.object_label_mismatch = 0
@@ -684,7 +728,6 @@ class CriterionHOI(nn.Module):
                     matched_tgt_verb_labels.append(torch.cat([tgt['verb_labels'][obj_idx], torch.tensor([0.0], device=self.device)], dim=0).unsqueeze(0))
                 else:
                     matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx].unsqueeze(0))
-                    
                 # pred_subject = pred[sub_idx]
 
                 # tgt_subject = tgt['sub_labels'][obj_idx]
@@ -721,7 +764,6 @@ class CriterionHOI(nn.Module):
                 #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
                 #     print(tgt['filename'])
                 #     self.object_box_mismatch += 1
-                    
             if self.add_negative_category:
                 unmatched_pred_verb_scores = []
                 for i in range(len(pred)):

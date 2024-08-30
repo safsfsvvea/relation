@@ -26,9 +26,7 @@ class DenoisingVitBackbone(nn.Module):
         return int(match.group(1))
 
     def load_model(self):
-        # 根据 denoised 状态加载不同的模型配置
         if self.denoised:
-            # 假设已经有加载逻辑和预训练权重
             print("model_type: ", self.model_type)
             vit = ViTWrapper(self.model_type, stride=self.patch_size)
             model = Denoiser(noise_map_height=37, noise_map_width=37, vit=vit, feature_dim=768)
@@ -64,15 +62,19 @@ class DenoisingVitBackbone(nn.Module):
     def forward(self, img):
         # img = nested_tensor.tensors
         # mask = nested_tensor.mask
-        img, scales = self.get_transform(img)
+        # img, scales = self.get_transform(img)
         img = img.to(self.device)
         features = self.model(img)
-        raw_features = features['raw_vit_feats']
-        denoised_features = features['pred_denoised_feats']
-        # print(denoised_features.requires_grad, raw_features.requires_grad)
-        return denoised_features, raw_features, scales
+        if self.denoised:
+            raw_features = features['raw_vit_feats']
+            denoised_features = features['pred_denoised_feats']
+            CLS_token = features['prefix_tokens']
+            return denoised_features, raw_features, CLS_token
+        else:
+            print("features shape: ", features.shape)
+            return features, None, None
 
     def extract_features(self, img_path):
         img = Image.open(img_path).convert('RGB')
-        denoised_features, raw_features, scales = self(img) # need modify
-        return denoised_features, raw_features, scales
+        denoised_features, raw_features = self(img) # need modify
+        return denoised_features, raw_features

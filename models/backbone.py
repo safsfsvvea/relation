@@ -43,7 +43,7 @@ class DINOv2Backbone(nn.Module):
     def forward(self, img):
         # img = nested_tensor.tensors
         # mask = nested_tensor.mask
-        img, scales = self.get_transform(img)
+        # img, scales = self.get_transform(img)
         img = img.to(self.device)
         with torch.no_grad():
             intermediate_layers = self.model.get_intermediate_layers(img, self.num_feature_levels)
@@ -52,7 +52,7 @@ class DINOv2Backbone(nn.Module):
                 x = x.permute(0, 2, 1)
                 x = x.view(x.shape[0], -1, self.new_height // 14, self.new_width // 14)
                 features[f'layer_{len(intermediate_layers) - i}'] = x
-        return features, scales
+        return features
 
     def extract_features(self, img_path):
         img = Image.open(img_path).convert('RGB')

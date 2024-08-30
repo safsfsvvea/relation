@@ -33,7 +33,8 @@ def crop(image, target, detection, region):
 
     # should we do something wrt the original size?
     target["size"] = torch.tensor([h, w])
-
+    detection["size"] = torch.tensor([h, w])
+    
     fields = ["labels", "area", "iscrowd"]
     fields_detection = ["labels", "scores"]
         
@@ -153,7 +154,8 @@ def resize(image, target, detection, size, max_size=None):
         boxes = detection["boxes"]
         scaled_boxes = boxes * torch.as_tensor([ratio_width, ratio_height, ratio_width, ratio_height])
         detection["boxes"] = scaled_boxes
-    
+    h, w = size
+    detection["size"] = torch.tensor([h, w])
     if target is None:
         return rescaled_image, None, detection
     
@@ -167,10 +169,9 @@ def resize(image, target, detection, size, max_size=None):
         area = target["area"]
         scaled_area = area * (ratio_width * ratio_height)
         target["area"] = scaled_area
-
-    h, w = size
+    
     target["size"] = torch.tensor([h, w])
-
+    
     if "masks" in target:
         target['masks'] = interpolate(
             target['masks'][:, None].float(), size, mode="nearest")[:, 0] > 0.5
@@ -182,7 +183,7 @@ def pad(image, target, detection, padding):
     # assumes that we only pad on the bottom right corners
     padded_image = F.pad(image, (0, 0, padding[0], padding[1]))
     detection = detection.copy()
-
+    detection["size"] = torch.tensor(padded_image[::-1])
     if target is None:
         return padded_image, None, detection
     target = target.copy()

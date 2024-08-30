@@ -22,6 +22,7 @@ from util.image import draw_umich_gaussian, gaussian_radius
 import torch
 import torch.utils.data
 import torchvision
+import torchvision.ops as ops
 from typing import List
 
 import datasets.transforms as T
@@ -282,7 +283,11 @@ class HICODetection_det(torch.utils.data.Dataset):
         self.img_folder = img_folder
         with open(anno_file, 'r') as f:
             self.annotations = json.load(f)
-            
+        if img_set == 'val':
+            detection_results = args.hico_det_file_test     
+        # print("img_set: ", img_set)
+        # print("args.hico_det_file_test in class: ", args.hico_det_file_test)
+        # print("detection_results: ", detection_results)   
         with open(detection_results, 'r') as f:
             self.detection_results = json.load(f)
         # print(len(self.annotations))
@@ -367,6 +372,8 @@ class HICODetection_det(torch.utils.data.Dataset):
         target = {}
         target['orig_size'] = torch.as_tensor([int(h), int(w)])
         target['size'] = torch.as_tensor([int(h), int(w)])
+        detection['orig_size'] = torch.as_tensor([int(h), int(w)])
+        detection['size'] = torch.as_tensor([int(h), int(w)])
         if self.img_set == 'train':
             # clamp the box and drop those unreasonable ones
             boxes[:, 0::2].clamp_(min=0, max=w)  # xyxy    clamp x to 0~w
@@ -383,6 +390,11 @@ class HICODetection_det(torch.utils.data.Dataset):
             detection['boxes'] = detection['boxes'][keep_det]
             detection['labels'] = detection['labels'][keep_det]
             detection['scores'] = detection['scores'][keep_det]
+            
+            # # perform nms for boxes to remove redundant boxes of the same objects
+            # keep_indices = ops.nms(detection['boxes'], detection['scores'], self.thres_nms)
+            # detection['boxes'] = detection['boxes'][keep_indices]
+            # detection['labels'] = detection['labels'][keep_indices]
             
             # construct target dict
             target['boxes'] = boxes
@@ -482,9 +494,39 @@ class HICODetection_det(torch.utils.data.Dataset):
         # print("detection['scores'] shape: ", detection['scores'].shape)
         # print("target['scores']: ", target['scores'])
         # print("target['scores'] shape: ", target['scores'].shape)
-        
-        return img, target, detection
+        rois_tensor, additional_info, detection_counts = self.prepare_rois(detection)
+        return img, target, rois_tensor, additional_info, detection_counts, detection
 
+    def prepare_rois(self, detection):
+        scale_factor = 14  # Assuming patch_size = 14
+
+        H, W = detection['size']
+        if not detection['boxes'].nelement():
+            return torch.empty((0, 4)), [], 0
+
+        boxes = detection['boxes']
+        labels = detection['labels']
+        scores = detection['scores']
+
+        cx, cy, bw, bh = boxes.T
+        xmin = (cx - bw / 2) * W
+        ymin = (cy - bh / 2) * H
+        xmax = (cx + bw / 2) * W
+        ymax = (cy + bh / 2) * H
+
+        scaled_xmin = xmin / scale_factor
+        scaled_ymin = ymin / scale_factor
+        scaled_xmax = xmax / scale_factor
+        scaled_ymax = ymax / scale_factor
+
+        rois = torch.stack([scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
+
+        additional_info = [{'label': label.item(), 'bbox': [roi[0].item() * scale_factor, roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor], 'score': score.item()}
+                           for label, roi, score in zip(labels, rois, scores)]
+
+        detection_counts = len(boxes)
+        return rois.float(), additional_info, detection_counts
+    
     def set_rare_hois(self, anno_file):
         with open(anno_file, 'r') as f:
             annotations = json.load(f)
@@ -561,6 +603,8 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
     def __init__(self, img_set, img_folder, anno_file, detection_results, transforms, num_queries, args = None):
         self.img_set = img_set
         self.img_folder = img_folder
+        self.thres_nms = args.thres_nms
+        print("thres_nms: ", self.thres_nms)
         with open(anno_file, 'r') as f:
             self.annotations = json.load(f)
             
@@ -652,7 +696,8 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         else:
             classes = [self._valid_obj_ids.index(obj['category_id']) for obj in img_anno['annotations']]
         classes = torch.tensor(classes, dtype=torch.int64)
-
+        classes = torch.tensor(classes, dtype=torch.int64)
+        print("classes: ", classes)
         target = {}
         target['orig_size'] = torch.as_tensor([int(h), int(w)])
         target['size'] = torch.as_tensor([int(h), int(w)])
@@ -673,12 +718,22 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
             detection['labels'] = detection['labels'][keep_det]
             detection['scores'] = detection['scores'][keep_det]
             
+            # perform nms for boxes to remove redundant boxes of the same objects
+            scores = torch.ones(len(boxes))
+            keep_indices = ops.nms(boxes, scores, self.thres_nms)
+            boxes_keep = boxes[keep_indices]
+            classes_keep = classes[keep_indices]
+            # print("classes: ", classes)
+            # print("classes_keep: ", classes_keep)
             # construct target dict
             target['boxes'] = boxes
             target['labels'] = classes  # like [[0, 0][1, 56][2, 0][3, 0]...]
             target['iscrowd'] = torch.tensor([0 for _ in range(boxes.shape[0])])
             target['area'] = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-
+            
+            # target1 = copy.deepcopy(target)
+            # target1['boxes'] = boxes_keep 
+            # target1['labels'] = classes_keep
             if self._transforms is not None:
                 img, target, detection = self._transforms(img, target, detection)
                 # print(img.shape)
@@ -736,14 +791,28 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
             target1 = copy.deepcopy(target)
                 
         else:
+            # perform nms for boxes to remove redundant boxes of the same objects
+            # print("-----------------------------")
+            # print("boxes before: ", boxes)
+            # print("classes before: ", classes)
+            scores = torch.ones(len(boxes))
+            keep_indices = ops.nms(boxes, scores, self.thres_nms)
+            # print("keep_indices: ", keep_indices)
+            boxes_keep = boxes[keep_indices]
+            classes_keep = classes[keep_indices]
+            # print("boxes after: ", boxes_keep)
+            # print("class after: ", classes_keep)
             target['filename'] = img_anno['file_name']
-            target['boxes'] = boxes # 
+            target['boxes'] = boxes #
+            # target['boxes_keep'] = boxes_keep 
             target['labels'] = classes # 
             target['id'] = idx # img_idx
             
             target1 = copy.deepcopy(target)
+            target1['boxes'] = boxes_keep 
+            target1['labels'] = classes_keep
             if self._transforms is not None:
-                img, target1, detection = self._transforms(img, target, detection)
+                img, target1, detection = self._transforms(img, target1, detection)
 
             hois = []
             for hoi in img_anno['hoi_annotation']:
@@ -755,19 +824,42 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         if not (target['labels'] < 80).all():
             raise ValueError("target labels should be less than or equal to 80.")
         
-        # if 'labels' not in target1:
-            # print("target1: ", target1)
-            # print("target: ", target)
         target1['scores'] = torch.ones((target1['labels'].shape[0],), dtype=torch.float32)
-        # print("target['scores']: ", target['scores'])
-        # print("target['scores'] shape: ", target['scores'].shape)
+        
         target1['labels'] = target1['labels'] + 1
-        # print("target1['labels']: ", target1['labels'])
-        # print("target1['labels'] shape: ", target1['labels'].shape)
-        # print("target['labels']: ", target['labels'])
-        # print("target['labels'] shape: ", target['labels'].shape)
-        return img, target, target1 # detection
+        rois_tensor, additional_info, detection_counts = self.prepare_rois(target1)
+        return img, target, rois_tensor, additional_info, detection_counts, target1
+    
+    def prepare_rois(self, detection):
+        scale_factor = 14  # Assuming patch_size = 14
 
+        H, W = detection['size']
+        if not detection['boxes'].nelement():
+            return torch.empty((0, 4)), [], 0
+
+        boxes = detection['boxes']
+        labels = detection['labels']
+        scores = detection['scores']
+
+        cx, cy, bw, bh = boxes.T
+        xmin = (cx - bw / 2) * W
+        ymin = (cy - bh / 2) * H
+        xmax = (cx + bw / 2) * W
+        ymax = (cy + bh / 2) * H
+
+        scaled_xmin = xmin / scale_factor
+        scaled_ymin = ymin / scale_factor
+        scaled_xmax = xmax / scale_factor
+        scaled_ymax = ymax / scale_factor
+
+        rois = torch.stack([scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
+
+        additional_info = [{'label': label.item(), 'bbox': [roi[0].item() * scale_factor, roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor], 'score': score.item()}
+                           for label, roi, score in zip(labels, rois, scores)]
+
+        detection_counts = len(boxes)
+        return rois.float(), additional_info, detection_counts
+    
     def set_rare_hois(self, anno_file):
         with open(anno_file, 'r') as f:
             annotations = json.load(f)
@@ -1192,14 +1284,15 @@ def build(image_set, args):
                                 num_queries=args.num_queries)
     else:
         if args.dataset_file == 'hico_det':
+            # print("args.hico_det_file_test: ", args.hico_det_file_test)
             dataset = HICODetection_det(image_set, img_folder, anno_file, detection_results = args.hico_det_file, transforms=make_hico_det_transforms(image_set),
                                 num_queries=args.num_queries, args = args)
-            print("it is HICODetection_det!!!!!!!!!!!!!!!!!!")
-            print("image_set: ", image_set)
-            print("args.zero_shot_setting: ", args.zero_shot_setting)
-            print("args.few_shot_transfer: ", args.few_shot_transfer)
-            print("args.use_correct_subject_category_hico: ", args.use_correct_subject_category_hico)
-            print("args.relation_label_noise: ", args.relation_label_noise)
+            # print("it is HICODetection_det!!!!!!!!!!!!!!!!!!")
+            # print("image_set: ", image_set)
+            # print("args.zero_shot_setting: ", args.zero_shot_setting)
+            # print("args.few_shot_transfer: ", args.few_shot_transfer)
+            # print("args.use_correct_subject_category_hico: ", args.use_correct_subject_category_hico)
+            # print("args.relation_label_noise: ", args.relation_label_noise)
         elif args.dataset_file == 'hico_det_gt':
             if args.notransform: 
                 #暂时关闭transform以debug

@@ -1,8 +1,8 @@
 from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
-from models.hoi import HOIModel, CriterionHOI, PostProcessHOI
+from models.hoi import HOIModel, CriterionHOI, PostProcessHOI, backbone_time
 from models.matcher import HungarianMatcherHOI_det
-from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time
+from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time, train_backbone_time, evaluate_hoi_single
 import datasets
 from datasets.hico import CustomSubset
 import util.misc as utils
@@ -28,8 +28,11 @@ from sklearn.model_selection import KFold
 import copy
 from transformers import get_linear_schedule_with_warmup
 from torch.optim.lr_scheduler import MultiStepLR
-
+from accelerate import Accelerator
+import deepspeed
+from torch.nn.parallel import DistributedDataParallel as DDP
 # from ultralytics import YOLO
+os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
@@ -37,7 +40,7 @@ def get_args_parser():
     parser.add_argument('--lr_backbone', default=0, type=float) #1e-5
     parser.add_argument('--text_encoder_lr', default=5e-5, type=float)
     parser.add_argument('--batch_size', default=4, type=int)
-    parser.add_argument('--accumulation_steps', default=32, type=int)
+    parser.add_argument('--accumulation_steps', default=16, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=150, type=int)
     parser.add_argument('--lr_drop', default=100, type=int)
@@ -63,13 +66,15 @@ def get_args_parser():
                         help='Unfreeze partial parameters.')
     parser.add_argument('--frozen_detection', action = 'store_true',
                         help='Freeze object detection part for RLIP.')
-
     #mlp
+    parser.add_argument('--roi_size', default=7, type=int,
+                        help="output size of roi_align")
     parser.add_argument('--use_LN', action='store_true', help='use LayerNorm.')
     parser.add_argument('--add_negative_category', action='store_true', help='add negative category.')
     parser.add_argument('--positive_negative', action='store_true', help='add positive negative mlp.')
 
     # * Backbone
+    parser.add_argument('--denoised', action='store_true', help='use denoised vit.')
     parser.add_argument('--backbone', default='resnet50', type=str,
                         help="Name of the convolutional backbone to use")
     parser.add_argument('--dilation', action='store_true',
@@ -79,6 +84,15 @@ def get_args_parser():
     parser.add_argument('--load_backbone', default='supervised', type=str, choices=['swav', 'supervised'])
 
     # * Transformer
+    parser.add_argument('--use_self_attention', action='store_true', help='use use self attention.')
+    parser.add_argument('--use_CLS', action='store_true', help='use CLS token.')
+    parser.add_argument('--use_attention', action='store_true', help='use attention.')
+    parser.add_argument(
+        "--position_encoding_type",
+        default = None,
+        type=str,
+        choices=("default", "HW")
+    )
     parser.add_argument('--attention_layers', default=1, type=int,
                         help="Number of attention layers")
     parser.add_argument('--enc_layers', default=6, type=int,
@@ -389,6 +403,8 @@ def get_args_parser():
 
 
     # Loss
+    parser.add_argument('--gamma', default=2.0, type=float, help='gamma for focal loss')
+    parser.add_argument('--alpha', default=0.25, type=float, help='alpha for focal loss')
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
                         help="Disables auxiliary decoding losses (loss at each layer)")
     parser.add_argument('--entropy_bound', action = 'store_true',
@@ -475,7 +491,8 @@ def get_args_parser():
                         help = "The detection result file for COCO")
     parser.add_argument('--hico_det_file', type=str, 
                         help = "The detection result file for HICO")
-    
+    parser.add_argument('--hico_det_file_test', type=str, 
+                        help = "The detection result file for HICO test set")
     parser.add_argument('--vg_rel_anno_file', type=str, 
                         help = "The annotation file for VG relation detection, used in the ConcatDataset mode.")
     parser.add_argument('--vg_keep_names_freq_file', type=str, 
@@ -504,6 +521,7 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--eval_single', action='store_true', help='eval for each single image in the dataset, and save gts for images with mAP lower than 0.5')
     parser.add_argument('--num_workers', default=2, type=int)
 
     # distributed training parameters
@@ -522,7 +540,11 @@ def ensure_dir(directory):
         os.makedirs(directory)
 
 def main(args):
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    accelerator = Accelerator(gradient_accumulation_steps=args.accumulation_steps, mixed_precision="bf16")
+    # print(f"Using DeepSpeed config: {accelerator.state.deepspeed_plugin.deepspeed_config}")
+    device = accelerator.device
+    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    args.device = device
     train_backbone = False
     if args.lr_backbone > 0:
         train_backbone = True
@@ -534,16 +556,19 @@ def main(args):
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
+    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention)
+    # model = DDP(model, find_unused_parameters=True)
+    # model = backbone_time(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
     matcher = HungarianMatcherHOI_det(
         device=device,
         cost_obj_class=args.set_cost_obj_class,
         cost_verb_class=args.set_cost_verb_class,
         cost_bbox=args.set_cost_bbox,
         cost_giou=args.set_cost_giou,
-        add_negative_category=args.add_negative_category
+        add_negative_category=args.add_negative_category,
+        args=args
     )
-    criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category, positive_negative=args.positive_negative)
+    criterion = CriterionHOI(matcher=matcher, device=device, alpha=args.alpha, gamma=args.gamma, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category, positive_negative=args.positive_negative)
     # optimizer = torch.optim.AdamW([
     # {'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr},
     # {'params': filter(lambda p: p.requires_grad, detector.parameters()), 'lr': args.lr_detector},
@@ -654,14 +679,14 @@ def main(args):
                                                                args.iterative_paradigm,
                                                                drop_last=False)
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
+                                   collate_fn=utils.collate_fn, num_workers=args.num_workers, pin_memory=True)
 
     
     # we do not need eval during pretraining.
     
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                    drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
+                    drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers, pin_memory=True)
     
     # if args.distributed:
     #     print("it is here val!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
@@ -726,13 +751,6 @@ def main(args):
         print("Cross-validation train results:", results2)
         print("Mean AP across train folds:", np.mean(results2))
     else:
-        if args.output_dir:
-            ensure_dir(args.output_dir)
-        if args.hoi and args.eval:
-            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
-            return
-        
-        tensorboard_writer = SummaryWriter(log_dir=args.log_dir)
         num_epochs = args.epochs
         lr_scheduler =None
         if args.schedule == "linear_with_warmup":
@@ -744,6 +762,21 @@ def main(args):
             milestones = [int(0.2 * num_epochs), int(0.4 * num_epochs), int(0.6 * num_epochs)]
             gamma = 0.1
             lr_scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+        model, optimizer, lr_scheduler, data_loader_train, data_loader_val = accelerator.prepare(
+        model, optimizer, lr_scheduler, data_loader_train, data_loader_val
+    )
+        print("lr_scheduler: ", lr_scheduler)
+        
+        if args.output_dir:
+            ensure_dir(args.output_dir)
+        if args.hoi and args.eval:
+            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
+            return
+        if args.hoi and args.eval_single:
+            test_stats = evaluate_hoi_single(model, postprocessors, data_loader_val, args.subject_category_id, device, args, threshold=0.5)
+            return
+        
+        tensorboard_writer = SummaryWriter(log_dir=args.log_dir)
         
         best_loss = float('inf')
         best_epoch = -1
@@ -751,7 +784,21 @@ def main(args):
         start_time = time.time()
         train_loss = 0
         for epoch in range(num_epochs):
-            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
+            try:
+                train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, accelerator, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
+            except Exception as e:
+                print(f"Error encountered during training at epoch {epoch}: {e}")
+                state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
+                checkpoint_filename = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}_error.pth.tar")
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'state_dict': state_dict_to_save,
+                    'optimizer': optimizer.state_dict(),
+                    'loss': train_loss if 'train_loss' in locals() else None,
+                }, filename=checkpoint_filename)
+                print(f"Checkpoint saved due to error at {checkpoint_filename}")
+                break  # Optionally, stop training on error
+            
             state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
             if args.output_dir and epoch % 100 == 0:
                 current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -780,17 +827,7 @@ def main(args):
                 
                 print(f"Best model saved to {best_model_filename} at epoch {epoch}")
             if epoch % 5 == 0 or epoch == num_epochs - 1:
-                # train_state_dict = copy.deepcopy(model.state_dict())
                 test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
-                # test_state_dict = copy.deepcopy(model.state_dict())
-                # assert torch.equal(train_input[0][0].tensors, test_input[0][0].tensors), "Train and test images are different"
-                # assert torch.equal(train_input[0][0].mask, test_input[0][0].mask), "Train and test masks are different"
-                # print("train target: ", train_input[0][1])
-                # print("test target: ", test_input[0][1])
-                # print("train detection: ", train_input[0][2])
-                # print("test detection: ", test_input[0][2])
-                # for key in train_state_dict:
-                #     assert torch.equal(train_state_dict[key], test_state_dict[key]), f"Train and test model parameters are different for key: {key}"
                 tensorboard_writer.add_scalar('Test/mAP', test_stats['mAP'], epoch)
                 
                 if test_stats['mAP'] > best_map:
@@ -814,6 +851,9 @@ def main(args):
             }, filename=checkpoint_filename)
             
             print(f"Checkpoint saved to {checkpoint_filename}")
+            
+            # Clear unused memory
+            torch.cuda.empty_cache()
         
         elapsed_time = time.time() - start_time
         print(f"Training completed in {elapsed_time:.2f} seconds")
