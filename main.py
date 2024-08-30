@@ -128,6 +128,8 @@ def get_args_parser():
 
     # HOI
     # Only one of --coco, --hoi and --cross_modal_pretrain can be True.
+    parser.add_argument('--score_threshold', default=0.7, type=float,
+                        help="score threshold to filter detection.")
     parser.add_argument('--topK', default=15, type=int,
                         help="iou top K filter human object pairs.")
     parser.add_argument('--iou_threshold', default=0.0, type=float,

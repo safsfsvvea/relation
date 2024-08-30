@@ -17,7 +17,7 @@ def draw_bbox(ax, bbox, label, score, color):
 
 def visualize_annotations(filename, annotations, output_dir):
     # 获取图像路径
-    image_path = os.path.join('/bd_byt4090i1/users/clin/RLIPv2/hico_20160224_det/images/train2015', filename)
+    image_path = os.path.join('/bd_byt4090i1/users/clin/RLIPv2/hico_20160224_det/images/test2015', filename)
     if not os.path.exists(image_path):
         print(f"Image {filename} not found at {image_path}. Skipping...")
         return
@@ -46,12 +46,12 @@ def load_and_visualize(json_file, output_dir):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    visualize_annotations('HICO_train2015_00000022.jpg', data['HICO_train2015_00000022.jpg'], output_dir)
+    visualize_annotations('HICO_test2015_00000064.jpg', data['HICO_test2015_00000064.jpg'], output_dir)
 
     # for filename, annotations in tqdm(data.items(), desc="Processing images"):
     #     visualize_annotations(filename, annotations, output_dir)
 
 # 使用示例
-json_file = '/bd_byt4090i1/users/clin/RLIPv2/hico_20160224_det/internimage/hico_det.json'
-output_dir = '/bd_byt4090i1/users/clin/relation/results/internimage_test'
+json_file = '/bd_byt4090i1/users/clin/RLIPv2/hico_20160224_det/internimage/hico_det_test.json'
+output_dir = '/bd_byt4090i1/users/clin/relation/results/internimage_test_test'
 load_and_visualize(json_file, output_dir)

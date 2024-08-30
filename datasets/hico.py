@@ -281,6 +281,8 @@ class HICODetection_det(torch.utils.data.Dataset):
     def __init__(self, img_set, img_folder, anno_file, detection_results, transforms, num_queries, args = None):
         self.img_set = img_set
         self.img_folder = img_folder
+        self.score_threshold = args.score_threshold
+        print("score_threshold: ", self.score_threshold)
         with open(anno_file, 'r') as f:
             self.annotations = json.load(f)
         if img_set == 'val':
@@ -348,6 +350,12 @@ class HICODetection_det(torch.utils.data.Dataset):
         detection['boxes'] = torch.tensor(detection_boxes, dtype=torch.float32) if detection_boxes else torch.tensor([], dtype=torch.float32).reshape(0, 4)
         detection['labels'] = torch.tensor(detection_labels, dtype=torch.int64) if detection_labels else torch.tensor([], dtype=torch.int64)
         detection['scores'] = torch.tensor(detection_scores, dtype=torch.float32) if detection_scores else torch.tensor([], dtype=torch.float32)
+        
+        keep_indices = detection['scores'] > self.score_threshold
+
+        detection['boxes'] = detection['boxes'][keep_indices]
+        detection['labels'] = detection['labels'][keep_indices]
+        detection['scores'] = detection['scores'][keep_indices]
         # if not (detection['labels'] < 80).all():
         #     raise ValueError("Detection labels should be less than or equal to 80.")
 
