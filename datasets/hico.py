@@ -503,7 +503,7 @@ class HICODetection_det(torch.utils.data.Dataset):
         # print("target['scores']: ", target['scores'])
         # print("target['scores'] shape: ", target['scores'].shape)
         rois_tensor, additional_info, detection_counts = self.prepare_rois(detection)
-        return img, target, rois_tensor, additional_info, detection_counts, detection
+        return img, target, rois_tensor, additional_info, detection_counts, detection['size'], detection['orig_size']
 
     def prepare_rois(self, detection):
         scale_factor = 14  # Assuming patch_size = 14
@@ -521,7 +521,6 @@ class HICODetection_det(torch.utils.data.Dataset):
         ymin = (cy - bh / 2) * H
         xmax = (cx + bw / 2) * W
         ymax = (cy + bh / 2) * H
-
         scaled_xmin = xmin / scale_factor
         scaled_ymin = ymin / scale_factor
         scaled_xmax = xmax / scale_factor

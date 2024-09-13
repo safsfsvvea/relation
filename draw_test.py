@@ -60,10 +60,11 @@ def load_and_visualize(json_file, output_dir):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    for info in tqdm(data, desc="Processing images"):
-        visualize_annotations(info, output_dir)
+    visualize_annotations(data[8195], output_dir)
+    # for info in tqdm(data, desc="Processing images"):
+    #     visualize_annotations(info, output_dir)
 
 # 使用示例
 json_file = '/bd_byt4090i1/users/clin/RLIPv2/hico_20160224_det/annotations/test_hico.json'
-output_dir = '/bd_byt4090i1/users/clin/relation/results/test_annotations'
+output_dir = '/bd_byt4090i1/users/clin/relation/results/test_annotations_test'
 load_and_visualize(json_file, output_dir)

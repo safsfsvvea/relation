@@ -438,7 +438,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
     # debug
     # input = []
     # forward_total_time = 0
-    for batch_idx, (images, targets, rois_tensor, additional_info, detection_counts, _) in progress_bar:
+    for batch_idx, (images, targets, rois_tensor, additional_info, detection_counts, size, _) in progress_bar:
         with accelerator.accumulate(model):
             images = images.to(device)
             targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
@@ -446,7 +446,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
             
             with accelerator.autocast():
                 # forward_start_time = time.time()
-                out = model(images, rois_tensor, additional_info, detection_counts)
+                out = model(images, rois_tensor, additional_info, detection_counts, size)
                 # forward_time = time.time() - forward_start_time
                 # forward_total_time += forward_time
 
@@ -564,7 +564,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
     #debug
     # input = []
     
-    for samples, targets, rois_tensor, additional_info, detection_counts, detections in metric_logger.log_every(data_loader, print_freq, header):
+    for samples, targets, rois_tensor, additional_info, detection_counts, size, orig_size in metric_logger.log_every(data_loader, print_freq, header):
         # targets: tuple, len(tuple) = batch_size
         #          element in tuple: a dict, whose keys are ['orig_size', 'size', 'boxes', 'labels', 'id', 'hois']
                 
@@ -575,11 +575,11 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
 
         # input.append((samples, targets, detections))
         
-        outputs = model(samples, rois_tensor, additional_info, detection_counts)
+        outputs = model(samples, rois_tensor, additional_info, detection_counts, size)
         # print("outputs: ", outputs)
         # loss = criterion(outputs, targets)
         # print("loss: ", loss)
-        results = postprocessors(outputs, detections)
+        results = postprocessors(outputs, size, orig_size)
         # print(results)
         # print(len(list(itertools.chain.from_iterable(utils.all_gather(results)))))
         # print(list(itertools.chain.from_iterable(utils.all_gather(results)))[0])

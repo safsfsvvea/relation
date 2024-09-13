@@ -46,7 +46,7 @@ def load_and_visualize(json_file, output_dir):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    visualize_annotations('HICO_test2015_00000064.jpg', data['HICO_test2015_00000064.jpg'], output_dir)
+    visualize_annotations('HICO_test2015_00008936.jpg', data['HICO_test2015_00008936.jpg'], output_dir)
 
     # for filename, annotations in tqdm(data.items(), desc="Processing images"):
     #     visualize_annotations(filename, annotations, output_dir)

@@ -23,14 +23,13 @@ import numpy as np
 import os
 
 class HungarianMatcherHOI_det(nn.Module):
-    def __init__(self, device, args, cost_obj_class=1.0, cost_verb_class=1.0, cost_bbox=1.0, cost_giou=1.0, add_negative_category=False):
+    def __init__(self, device, args, cost_obj_class=1.0, cost_verb_class=1.0, cost_bbox=1.0, cost_giou=1.0):
         super().__init__()
         self.device = device
         self.cost_obj_class = cost_obj_class
         self.cost_verb_class = cost_verb_class
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
-        self.add_negative_category= add_negative_category
         self.output_dir = args.output_dir
         print("self.cost_obj_class: ", self.cost_obj_class)
         print("self.cost_verb_class: ", self.cost_verb_class)
@@ -66,10 +65,7 @@ class HungarianMatcherHOI_det(nn.Module):
             tgt_obj_boxes = tgt['obj_boxes'].to(self.device)
             tgt_obj_labels = tgt['obj_labels'].to(self.device)
             # print("tgt['verb_labels']: ", tgt['verb_labels'])
-            if self.add_negative_category:
-                tgt_verb_labels = torch.cat([tgt['verb_labels'], torch.zeros(tgt['verb_labels'].size(0), 1, device=self.device)], dim=1).to(self.device)
-            else:
-                tgt_verb_labels = tgt['verb_labels'].to(self.device)
+            tgt_verb_labels = tgt['verb_labels'].to(self.device)
             
             H, W = tgt['size']
             tgt_sub_boxes = box_cxcywh_to_xyxy(tgt_sub_boxes) * torch.tensor([W, H, W, H], device=self.device)
@@ -136,10 +132,10 @@ class HungarianMatcherHOI_det(nn.Module):
                     'outputs': outputs,
                     'targets': targets,
                     'cost_matrix': C,
-                    'cost_obj_class': self.cost_obj_class,
-                    'cost_verb_class': self.cost_verb_class,
-                    'cost_bbox': self.cost_bbox,
-                    'cost_giou': self.cost_giou,
+                    'cost_obj_class': cost_class,
+                    'cost_verb_class': cost_verb,
+                    'cost_bbox': cost_bbox,
+                    'cost_giou': cost_giou,
                 }, checkpoint_filename)
                 raise
             # sub_ind, obj_ind = linear_sum_assignment(C.numpy())

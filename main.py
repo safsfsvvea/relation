@@ -1,6 +1,6 @@
 from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
-from models.hoi import HOIModel, CriterionHOI, PostProcessHOI, backbone_time
+from models.hoi import HOIModel, CriterionHOI, PostProcessHOI
 from models.matcher import HungarianMatcherHOI_det
 from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time, train_backbone_time, evaluate_hoi_single
 import datasets
@@ -67,8 +67,11 @@ def get_args_parser():
     parser.add_argument('--frozen_detection', action = 'store_true',
                         help='Freeze object detection part for RLIP.')
     #mlp
+    parser.add_argument('--position_bbox', action='store_true', help='use relative bbox position embedding.')
     parser.add_argument('--roi_size', default=7, type=int,
                         help="output size of roi_align")
+    parser.add_argument('--negative_sample_num', default=10, type=int,
+                        help="negative sample number")
     parser.add_argument('--use_LN', action='store_true', help='use LayerNorm.')
     parser.add_argument('--add_negative_category', action='store_true', help='add negative category.')
     parser.add_argument('--positive_negative', action='store_true', help='add positive negative mlp.')
@@ -84,7 +87,7 @@ def get_args_parser():
     parser.add_argument('--load_backbone', default='supervised', type=str, choices=['swav', 'supervised'])
 
     # * Transformer
-    parser.add_argument('--use_self_attention', action='store_true', help='use use self attention.')
+    parser.add_argument('--use_self_attention', action='store_true', help='use self attention.')
     parser.add_argument('--use_CLS', action='store_true', help='use CLS token.')
     parser.add_argument('--use_attention', action='store_true', help='use attention.')
     parser.add_argument(
@@ -558,7 +561,7 @@ def main(args):
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention)
+    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention, position_bbox=args.position_bbox)
     # model = DDP(model, find_unused_parameters=True)
     # model = backbone_time(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
     matcher = HungarianMatcherHOI_det(
@@ -567,10 +570,9 @@ def main(args):
         cost_verb_class=args.set_cost_verb_class,
         cost_bbox=args.set_cost_bbox,
         cost_giou=args.set_cost_giou,
-        add_negative_category=args.add_negative_category,
         args=args
     )
-    criterion = CriterionHOI(matcher=matcher, device=device, alpha=args.alpha, gamma=args.gamma, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category, positive_negative=args.positive_negative)
+    criterion = CriterionHOI(matcher=matcher, device=device, alpha=args.alpha, gamma=args.gamma, loss_type=args.verb_loss_type, add_negative_category=args.add_negative_category, positive_negative=args.positive_negative, negative_sample_num=args.negative_sample_num)
     # optimizer = torch.optim.AdamW([
     # {'params': filter(lambda p: p.requires_grad, model.parameters()), 'lr': args.lr},
     # {'params': filter(lambda p: p.requires_grad, detector.parameters()), 'lr': args.lr_detector},
@@ -689,177 +691,114 @@ def main(args):
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                     drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers, pin_memory=True)
-    
-    # if args.distributed:
-    #     print("it is here val!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    #     sampler_val = DistributedSampler(dataset_val, shuffle=False)
-    # else:
-    if args.do_cross_validation:
-        # 使用交叉验证
-        kf = KFold(n_splits=args.num_folds, shuffle=True, random_state=42)
-        results1 = []
-        results2 = []
 
-        for fold, (train_idx, val_idx) in enumerate(kf.split(dataset_train)):
-            train_subset = CustomSubset(dataset_train, train_idx)
-            val_subset1 = CustomSubset(dataset_val, val_idx)
-            val_subset2 = CustomSubset(dataset_val, train_idx)
-            
-            sampler_train = torch.utils.data.RandomSampler(train_subset)
-            batch_sampler_train = torch.utils.data.BatchSampler(
-                sampler_train, args.batch_size, drop_last=True)
-            
-            train_loader = DataLoader(train_subset, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
-            
-            sampler_val1 = torch.utils.data.SequentialSampler(val_subset1)
-            val_loader1 = DataLoader(val_subset1, args.batch_size, sampler=sampler_val1,
-                        drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-            sampler_val2 = torch.utils.data.SequentialSampler(val_subset2)
-            val_loader2 = DataLoader(val_subset2, args.batch_size, sampler=sampler_val2,
-                        drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-
-            # 重新初始化模型和优化器以避免泄露前一轮的信息
-            model = HOIModel(backbone, device=device)
-            matcher = HungarianMatcherHOI_det(
-                device=device,
-                cost_obj_class=args.set_cost_obj_class,
-                cost_verb_class=args.set_cost_verb_class,
-                cost_bbox=args.set_cost_bbox,
-                cost_giou=args.set_cost_giou
-            )
-            criterion = CriterionHOI(matcher=matcher, device=device, loss_type=args.verb_loss_type)
-            optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,
-                                        weight_decay=args.weight_decay)
-            postprocessors = PostProcessHOI(relation_threshold=args.relation_threshold, device=device)
-
-            print(f"Starting fold {fold+1}/{args.num_folds}")
-            for epoch in range(args.epochs):
-                train_loss = train_one_epoch(model, criterion, optimizer, train_loader, device, epoch)
-                # 这里可以添加验证逻辑和TensorBoard记录
-
-            # 评估这个折叠
-            test_stats1 = evaluate_hoi(args.dataset_file, model, postprocessors, val_loader1, args.subject_category_id, device, args)
-            test_stats2 = evaluate_hoi(args.dataset_file, model, postprocessors, val_loader2, args.subject_category_id, device, args)
-            results1.append(test_stats1['mAP'])
-            results2.append(test_stats2['mAP'])
-            
-            print(f"Fold {fold+1} mAP val: {test_stats1['mAP']}")
-            print(f"Fold {fold+1} mAP train: {test_stats2['mAP']}")
-
-        print("Cross-validation val results:", results1)
-        print("Mean AP across val folds:", np.mean(results1))
-        
-        print("Cross-validation train results:", results2)
-        print("Mean AP across train folds:", np.mean(results2))
-    else:
-        num_epochs = args.epochs
-        lr_scheduler =None
-        if args.schedule == "linear_with_warmup":
-            # 计算总的训练步骤数
-            total_steps = len(data_loader_train) * num_epochs // args.accumulation_steps
-            warmup_steps = total_steps // 10  # 例如，使用总步骤数的10%作为warmup
-            lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
-        elif args.schedule == "multistep":
-            milestones = [int(0.2 * num_epochs), int(0.4 * num_epochs), int(0.6 * num_epochs)]
-            gamma = 0.1
-            lr_scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
-        model, optimizer, lr_scheduler, data_loader_train, data_loader_val = accelerator.prepare(
-        model, optimizer, lr_scheduler, data_loader_train, data_loader_val
+    num_epochs = args.epochs
+    lr_scheduler =None
+    if args.schedule == "linear_with_warmup":
+        # 计算总的训练步骤数
+        total_steps = len(data_loader_train) * num_epochs // args.accumulation_steps
+        warmup_steps = total_steps // 10  # 例如，使用总步骤数的10%作为warmup
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+    elif args.schedule == "multistep":
+        milestones = [int(0.2 * num_epochs), int(0.4 * num_epochs), int(0.6 * num_epochs)]
+        gamma = 0.1
+        lr_scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+    model, optimizer, lr_scheduler, data_loader_train, data_loader_val = accelerator.prepare(
+    model, optimizer, lr_scheduler, data_loader_train, data_loader_val
     )
-        print("lr_scheduler: ", lr_scheduler)
-        
-        if args.output_dir:
-            ensure_dir(args.output_dir)
-        if args.hoi and args.eval:
-            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
-            return
-        if args.hoi and args.eval_single:
-            test_stats = evaluate_hoi_single(model, postprocessors, data_loader_val, args.subject_category_id, device, args, threshold=0.5)
-            return
-        
-        tensorboard_writer = SummaryWriter(log_dir=args.log_dir)
-        
-        best_loss = float('inf')
-        best_epoch = -1
-        best_map = 0
-        start_time = time.time()
-        train_loss = 0
-        for epoch in range(num_epochs):
-            try:
-                train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, accelerator, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
-            except Exception as e:
-                print(f"Error encountered during training at epoch {epoch}: {e}")
-                state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
-                checkpoint_filename = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}_error.pth.tar")
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'state_dict': state_dict_to_save,
-                    'optimizer': optimizer.state_dict(),
-                    'loss': train_loss if 'train_loss' in locals() else None,
-                }, filename=checkpoint_filename)
-                print(f"Checkpoint saved due to error at {checkpoint_filename}")
-                break  # Optionally, stop training on error
-            
+    print("lr_scheduler: ", lr_scheduler)
+    
+    if args.output_dir:
+        ensure_dir(args.output_dir)
+    if args.hoi and args.eval:
+        test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
+        return
+    if args.hoi and args.eval_single:
+        test_stats = evaluate_hoi_single(model, postprocessors, data_loader_val, args.subject_category_id, device, args, threshold=1.0)
+        return
+    
+    tensorboard_writer = SummaryWriter(log_dir=args.log_dir)
+    
+    best_loss = float('inf')
+    best_epoch = -1
+    best_map = 0
+    start_time = time.time()
+    train_loss = 0
+    for epoch in range(num_epochs):
+        try:
+            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, accelerator, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
+        except Exception as e:
+            print(f"Error encountered during training at epoch {epoch}: {e}")
             state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
-            if args.output_dir and epoch % 100 == 0:
-                current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-                checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
-                checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'state_dict': state_dict_to_save,
-                    'optimizer': optimizer.state_dict(),
-                    'loss': train_loss,
-                }, filename=checkpoint_filename)
-                
-                print(f"Checkpoint saved to {checkpoint_filename}")
-            if train_loss < best_loss:
-                best_loss = train_loss
-                best_epoch = epoch
-                
-                # 保存最小损失模型
-                best_model_filename = os.path.join(args.output_dir, "best_model.pth.tar")
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'state_dict': state_dict_to_save,
-                    'optimizer': optimizer.state_dict(),
-                    'loss': train_loss,
-                }, filename=best_model_filename)
-                
-                print(f"Best model saved to {best_model_filename} at epoch {epoch}")
-            if epoch % 5 == 0 or epoch == num_epochs - 1:
-                test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
-                tensorboard_writer.add_scalar('Test/mAP', test_stats['mAP'], epoch)
-                
-                if test_stats['mAP'] > best_map:
-                    best_map = test_stats['mAP']
-                    best_map_model_filename = os.path.join(args.output_dir, "best_map_model.pth.tar")
-                    save_checkpoint({
-                        'epoch': epoch + 1,
-                        'state_dict': state_dict_to_save,
-                        'optimizer': optimizer.state_dict(),
-                        'loss': train_loss,
-                        'mAP': test_stats['mAP'],
-                    }, filename=best_map_model_filename)
-                    print(f"Best mAP model saved to {best_map_model_filename} with mAP {best_map} at epoch {epoch}")
-            checkpoint_filename = f"checkpoint.pth.tar"
+            checkpoint_filename = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}_error.pth.tar")
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'state_dict': state_dict_to_save,
+                'optimizer': optimizer.state_dict(),
+                'loss': train_loss if 'train_loss' in locals() else None,
+            }, filename=checkpoint_filename)
+            print(f"Checkpoint saved due to error at {checkpoint_filename}")
+            break  # Optionally, stop training on error
+        
+        state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
+        if args.output_dir and epoch % 100 == 0:
+            current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            checkpoint_filename = f"checkpoint_epoch_{epoch}_{current_time}.pth.tar"
             checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
             save_checkpoint({
-                'epoch': num_epochs,
+                'epoch': epoch + 1,
                 'state_dict': state_dict_to_save,
                 'optimizer': optimizer.state_dict(),
                 'loss': train_loss,
             }, filename=checkpoint_filename)
             
             print(f"Checkpoint saved to {checkpoint_filename}")
+        if train_loss < best_loss:
+            best_loss = train_loss
+            best_epoch = epoch
             
-            # Clear unused memory
-            torch.cuda.empty_cache()
+            # 保存最小损失模型
+            best_model_filename = os.path.join(args.output_dir, "best_model.pth.tar")
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'state_dict': state_dict_to_save,
+                'optimizer': optimizer.state_dict(),
+                'loss': train_loss,
+            }, filename=best_model_filename)
+            
+            print(f"Best model saved to {best_model_filename} at epoch {epoch}")
+        if epoch % 5 == 0 or epoch == num_epochs - 1:
+            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
+            tensorboard_writer.add_scalar('Test/mAP', test_stats['mAP'], epoch)
+            
+            if test_stats['mAP'] > best_map:
+                best_map = test_stats['mAP']
+                best_map_model_filename = os.path.join(args.output_dir, "best_map_model.pth.tar")
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'state_dict': state_dict_to_save,
+                    'optimizer': optimizer.state_dict(),
+                    'loss': train_loss,
+                    'mAP': test_stats['mAP'],
+                }, filename=best_map_model_filename)
+                print(f"Best mAP model saved to {best_map_model_filename} with mAP {best_map} at epoch {epoch}")
+        checkpoint_filename = f"checkpoint.pth.tar"
+        checkpoint_filename = os.path.join(args.output_dir, checkpoint_filename)
+        save_checkpoint({
+            'epoch': num_epochs,
+            'state_dict': state_dict_to_save,
+            'optimizer': optimizer.state_dict(),
+            'loss': train_loss,
+        }, filename=checkpoint_filename)
         
-        elapsed_time = time.time() - start_time
-        print(f"Training completed in {elapsed_time:.2f} seconds")
-        tensorboard_writer.close()
+        print(f"Checkpoint saved to {checkpoint_filename}")
+        
+        # Clear unused memory
+        torch.cuda.empty_cache()
+    
+    elapsed_time = time.time() - start_time
+    print(f"Training completed in {elapsed_time:.2f} seconds")
+    tensorboard_writer.close()
 
     
 if __name__ == "__main__":

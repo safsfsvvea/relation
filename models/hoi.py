@@ -1,5 +1,6 @@
 import torch
-import torch.nn as nn
+from torch import nn, Tensor
+from typing import Dict, List, Optional, Tuple
 import torch.nn.functional as F
 from util.misc import NestedTensor
 import time
@@ -11,9 +12,10 @@ import torch.profiler
 from util.box_ops import box_cxcywh_to_xyxy
 from torchvision.ops import box_iou
 from models.position_encoding import PositionEmbeddingSine, PositionEmbeddingSineHW
+import torchvision.ops.boxes as box_ops
 
 class HOIModel(nn.Module):
-    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1, denoised=True, position_encoding_type=None, use_attention=True, use_CLS=True, roi_size=7, use_self_attention=True):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1, denoised=True, position_encoding_type=None, use_attention=True, use_CLS=True, roi_size=7, use_self_attention=True, position_bbox=True):
         super(HOIModel, self).__init__()
         self.backbone = backbone
         self.device = device
@@ -24,7 +26,7 @@ class HOIModel(nn.Module):
         self.no_pairs_count = 0  # 用于统计 "No pairs found for this batch." 的计数
         self.no_results_count = 0  # 用于统计 "No results found for this image." 的计数
         self.iou_threshold = iou_threshold
-        self.num_category = 117 if not add_negative_category else 118
+        self.num_category = 117
         self.topK = topK
         self.positive_negative = positive_negative
         self.denoised = denoised
@@ -32,6 +34,22 @@ class HOIModel(nn.Module):
         self.use_CLS = use_CLS
         self.roi_size= roi_size
         self.use_self_attention = use_self_attention
+        self.position_bbox= position_bbox
+        if self.position_bbox:
+            # Map spatial encodings to the same dimension as appearance features
+            self.spatial_head = nn.Sequential(
+                nn.Linear(36, 128),
+                nn.ReLU(),
+                nn.Linear(128, 256),
+                nn.ReLU(),
+                nn.Linear(256, feature_dim * 2),
+                nn.ReLU(),
+            )
+            self.mbf = MultiBranchFusion(
+                feature_dim * 2,
+                feature_dim * 2, feature_dim * 2,
+                cardinality=16
+            )
         if use_attention:
             if use_CLS or self.use_self_attention:
                 self.attention = MultiheadAttentionStack(embed_dim=feature_dim, num_heads=num_heads, num_layers=num_layers, dropout=dropout)
@@ -41,12 +59,20 @@ class HOIModel(nn.Module):
                 self.position_encoding = PositionEmbeddingSine(num_pos_feats=feature_dim // 2)
             elif position_encoding_type == 'HW':
                 self.position_encoding = PositionEmbeddingSineHW(num_pos_feats=feature_dim // 2)
+            # if self.position_bbox:
             self.mlp = nn.Sequential(
-                nn.Linear(feature_dim, 256),
-                nn.ReLU(),
-                nn.Dropout(dropout), 
-                nn.Linear(256, self.num_category)
+            nn.Linear(feature_dim*2, 256),
+            nn.ReLU(),
+            nn.Dropout(dropout), 
+            nn.Linear(256, self.num_category)
             )
+            # else:
+            #     self.mlp = nn.Sequential(
+            #         nn.Linear(feature_dim, 256),
+            #         nn.ReLU(),
+            #         nn.Dropout(dropout), 
+            #         nn.Linear(256, self.num_category)
+            #     )
         else:
             self.attention = None      
             if not use_LN:
@@ -145,7 +171,7 @@ class HOIModel(nn.Module):
         print("num_heads: ", num_heads)
         print("num_layers: ", num_layers)
         print("dropout: ", dropout)
-        
+        print("position_bbox: ", position_bbox)
 
         self.to(self.device)
 
@@ -302,7 +328,7 @@ class HOIModel(nn.Module):
 
         return attn_mask
     
-    def forward(self, nested_tensor: NestedTensor, rois_tensor, additional_info, detection_counts):
+    def forward(self, nested_tensor: NestedTensor, rois_tensor, additional_info, detection_counts, size):
         images = nested_tensor.tensors
         # print("image size", images.size())
         mask = nested_tensor.mask
@@ -349,6 +375,8 @@ class HOIModel(nn.Module):
         pair_start_indices = []
         hoi_results = []
         current_index = 0
+        bbox_human = []
+        bbox_object = []
         for i, (features, info) in enumerate(zip(separated_features, additional_info)):
             human_features = []
             object_features = []
@@ -372,10 +400,19 @@ class HOIModel(nn.Module):
             
             pair_start_indices.append(current_index)
             
+            H, W = size[i]
             for human in human_features:
                 for obj in object_features:
-                    # print("human[0].shape: ", human[0].shape)
-                    # print("obj[0].shape: ", obj[0].shape)
+                    human_bbox = human[3]  # human 的边界框 [x_min, y_min, x_max, y_max]
+                    obj_bbox = obj[3]  # object 的边界框 [x_min, y_min, x_max, y_max]
+
+                    # 转换成 0-1 的 xyxy 格式
+                    human_bbox_normalized = [human_bbox[i] / (W if i % 2 == 0 else H) for i in range(4)]
+                    obj_bbox_normalized = [obj_bbox[i] / (W if i % 2 == 0 else H) for i in range(4)]
+
+                    bbox_human.append(human_bbox_normalized)
+                    bbox_object.append(obj_bbox_normalized)
+
                     if self.attention is not None:
                         if self.use_CLS:
                             combined_feature = torch.cat([human[0].unsqueeze(1), obj[0].unsqueeze(1), CLS_token[i].unsqueeze(1).unsqueeze(2)], dim=-1)
@@ -402,8 +439,9 @@ class HOIModel(nn.Module):
                     })
                     current_index += 1
         # print("len(all_pairs): ", len(all_pairs))
-        
-        
+        bbox_human = [torch.tensor(bbox_human)]
+        bbox_object = [torch.tensor(bbox_object)]
+        pair_feature_out = 0
         if self.attention is not None:
             if query_list:
                 if self.use_CLS or self.use_self_attention:
@@ -411,10 +449,10 @@ class HOIModel(nn.Module):
                     query = query.permute(2, 1, 0)  # [768, N, 99] -> [99, N, 768]
                     if self.use_self_attention:
                         attn_mask = self.generate_attention_mask(num_human=self.roi_size**2, num_object=self.roi_size**2, num_cls=0)
-                        # print("attn_mask: ", attn_mask)
                     else:
                         attn_mask = self.generate_attention_mask(num_human=self.roi_size**2, num_object=self.roi_size**2, num_cls=1)
                     query_out = self.attention(query=query, key=query ,value=query, attn_mask=attn_mask)
+                    pair_feature_out = torch.cat([query_out[48, :, :], query_out[97, :, :]], dim=-1)
                 else:
                     query = torch.cat(query_list, dim=1)  # [768, 1, 49] -> [768, N, 49]
                     key = torch.cat(key_list, dim=1)      # [768, 1, 49] -> [768, N, 49]
@@ -427,9 +465,20 @@ class HOIModel(nn.Module):
                     value = key.clone()
                     
                     query_out, key_out = self.attention(query, key ,value)
-
-                last_position_feature = query_out[-1, :, :]
-                relation_scores = self.mlp(last_position_feature)
+                    pair_feature_out = torch.cat([query_out[-1, :, :], key_out[-1, :, :]], dim=-1)
+                if self.position_bbox:
+                    # Compute spatial features
+                    box_pair_spatial = compute_spatial_encodings(
+                        bbox_human, bbox_object, [(1, 1)]
+                    ).to(self.device)
+                    box_pair_spatial = self.spatial_head(box_pair_spatial)
+                    # print("pair_feature_out: ", pair_feature_out.shape)
+                    # print("box_pair_spatial: ", box_pair_spatial.shape)
+                    mlp_input_feature = self.mbf(pair_feature_out, box_pair_spatial)
+                    # print("mlp_input_feature: ", mlp_input_feature.shape)
+                else:
+                    mlp_input_feature = pair_feature_out
+                relation_scores = self.mlp(mlp_input_feature)
 
                 for i, score in enumerate(relation_scores):
                     hoi_results[i]['relation_score'] = score
@@ -482,30 +531,111 @@ class HOIModel(nn.Module):
                 image_hoi_results.append(hoi_results[start_idx:end_idx])
         return image_hoi_results 
 
-class backbone_time(nn.Module):
-    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, add_negative_category = False, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1):
-        super(backbone_time, self).__init__()
-        self.backbone = backbone
-        self.device = device
-        self.num_objects = num_objects
-        self.feature_dim = feature_dim
-        self.person_category_id = person_category_id
-        self.patch_size = patch_size
-        self.no_pairs_count = 0  # 用于统计 "No pairs found for this batch." 的计数
-        self.no_results_count = 0  # 用于统计 "No results found for this image." 的计数
-        self.iou_threshold = iou_threshold
-        self.num_category = 117 if not add_negative_category else 118
-        self.topK = topK
-        self.positive_negative = positive_negative
-    
-    def forward(self, nested_tensor: NestedTensor, rois_tensor, additional_info, detection_counts):
-        images = nested_tensor.tensors
-        # print("image device: ", images.device)
-        # print("image size", images.size())
-        mask = nested_tensor.mask
-        batch_size = images.size(0)
-        batch_denoised_features, _, scales = self.backbone(images)
-        return batch_denoised_features
+class MultiBranchFusion(nn.Module):
+    """
+    Multi-branch fusion module
+
+    Parameters:
+    -----------
+    appearance_size: int
+        Size of the appearance features
+    spatial_size: int
+        Size of the spatial features
+    hidden_state_size: int
+        Size of the intermediate representations
+    cardinality: int
+        The number of homogeneous branches
+    """
+    def __init__(self,
+        appearance_size: int, spatial_size: int,
+        hidden_state_size: int, cardinality: int
+    ) -> None:
+        super().__init__()
+        self.cardinality = cardinality
+
+        sub_repr_size = int(hidden_state_size / cardinality)
+        assert sub_repr_size * cardinality == hidden_state_size, \
+            "The given representation size should be divisible by cardinality"
+
+        self.fc_1 = nn.ModuleList([
+            nn.Linear(appearance_size, sub_repr_size)
+            for _ in range(cardinality)
+        ])
+        self.fc_2 = nn.ModuleList([
+            nn.Linear(spatial_size, sub_repr_size)
+            for _ in range(cardinality)
+        ])
+        self.fc_3 = nn.ModuleList([
+            nn.Linear(sub_repr_size, hidden_state_size)
+            for _ in range(cardinality)
+        ])
+    def forward(self, appearance: Tensor, spatial: Tensor) -> Tensor:
+        return F.relu(torch.stack([
+            fc_3(F.relu(fc_1(appearance) * fc_2(spatial)))
+            for fc_1, fc_2, fc_3
+            in zip(self.fc_1, self.fc_2, self.fc_3)
+        ]).sum(dim=0))
+        
+def compute_spatial_encodings(
+    boxes_1: List[Tensor], boxes_2: List[Tensor],
+    shapes: List[Tuple[int, int]], eps: float = 1e-10
+) -> Tensor:
+    """
+    Parameters:
+    -----------
+    boxes_1: List[Tensor]
+        First set of bounding boxes (M, 4)
+    boxes_1: List[Tensor]
+        Second set of bounding boxes (M, 4)
+    shapes: List[Tuple[int, int]]
+        Image shapes, heights followed by widths
+    eps: float
+        A small constant used for numerical stability
+
+    Returns:
+    --------
+    Tensor
+        Computed spatial encodings between the boxes (N, 36)
+    """
+    features = []
+    for b1, b2, shape in zip(boxes_1, boxes_2, shapes):
+        h, w = shape
+
+        c1_x = (b1[:, 0] + b1[:, 2]) / 2; c1_y = (b1[:, 1] + b1[:, 3]) / 2
+        c2_x = (b2[:, 0] + b2[:, 2]) / 2; c2_y = (b2[:, 1] + b2[:, 3]) / 2
+
+        b1_w = b1[:, 2] - b1[:, 0]; b1_h = b1[:, 3] - b1[:, 1]
+        b2_w = b2[:, 2] - b2[:, 0]; b2_h = b2[:, 3] - b2[:, 1]
+
+        d_x = torch.abs(c2_x - c1_x) / (b1_w + eps)
+        d_y = torch.abs(c2_y - c1_y) / (b1_h + eps)
+
+        iou = torch.diag(box_ops.box_iou(b1, b2))
+
+        # Construct spatial encoding
+        f = torch.stack([
+            # Relative position of box centre
+            c1_x / w, c1_y / h, c2_x / w, c2_y / h,
+            # Relative box width and height
+            b1_w / w, b1_h / h, b2_w / w, b2_h / h,
+            # Relative box area
+            b1_w * b1_h / (h * w), b2_w * b2_h / (h * w),
+            b2_w * b2_h / (b1_w * b1_h + eps),
+            # Box aspect ratio
+            b1_w / (b1_h + eps), b2_w / (b2_h + eps),
+            # Intersection over union
+            iou,
+            # Relative distance and direction of the object w.r.t. the person
+            (c2_x > c1_x).float() * d_x,
+            (c2_x < c1_x).float() * d_x,
+            (c2_y > c1_y).float() * d_y,
+            (c2_y < c1_y).float() * d_y,
+        ], 1)
+
+        features.append(
+            torch.cat([f, torch.log(f + eps)], 1)
+        )
+    return torch.cat(features)
     
 class MultiheadAttentionBlock(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout=0.1):
@@ -579,7 +709,7 @@ class PostProcessHOI(nn.Module):
         print("self.positive_negative: ", self.positive_negative)
         self.device = device
 
-    def forward(self, batch_hoi_results, detections):
+    def forward(self, batch_hoi_results, size_batch, orig_size_batch):
         # 存储最终的处理结果
         processed_results = []
 
@@ -594,8 +724,8 @@ class PostProcessHOI(nn.Module):
             object_labels = []
             obj_ids = []
             idx = 0
-            orig_size = detections[b]['orig_size'].to(self.device)
-            current_size = detections[b]['size'].to(self.device)
+            orig_size = orig_size_batch[b].to(self.device)
+            current_size = size_batch[b].to(self.device)
             scale_w = orig_size[1].float() / current_size[1].float()  # 宽度比例
             scale_h = orig_size[0].float() / current_size[0].float()  # 高度比例
             # 对每个图像的HOI结果进行处理
@@ -662,13 +792,14 @@ class PostProcessHOI(nn.Module):
         return processed_results
 
 class CriterionHOI(nn.Module):
-    def __init__(self, matcher, device, alpha=0.25, gamma=2.0, loss_type='focal', add_negative_category=False, positive_negative=False):
+    def __init__(self, matcher, device, alpha=0.25, gamma=2.0, loss_type='focal', add_negative_category=False, positive_negative=False, negative_sample_num = 10):
         super().__init__()
         self.matcher = matcher
         self.device = device
         self.alpha = alpha
         self.gamma = gamma
         self.loss_type = loss_type
+        self.negative_sample_num = negative_sample_num
         print("loss type: ", self.loss_type)
         print("self.alpha: ", self.alpha)
         print("self.gamma: ", self.gamma)
@@ -679,7 +810,7 @@ class CriterionHOI(nn.Module):
         self.object_box_mismatch = 0
         self.total_pairs = 0
         self.add_negative_category = add_negative_category
-        self.num_category = 117 if not add_negative_category else 118
+        self.num_category = 117
         self.positive_negative = positive_negative
     def forward(self, outputs, targets):
         """
@@ -724,10 +855,7 @@ class CriterionHOI(nn.Module):
                 # 使用 [1, 0] 作为正类标签
                 matched_binary_labels.append(torch.tensor([1, 0], device=self.device).unsqueeze(0))
                 
-                if self.add_negative_category:
-                    matched_tgt_verb_labels.append(torch.cat([tgt['verb_labels'][obj_idx], torch.tensor([0.0], device=self.device)], dim=0).unsqueeze(0))
-                else:
-                    matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx].unsqueeze(0))
+                matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx].unsqueeze(0))
                 # pred_subject = pred[sub_idx]
 
                 # tgt_subject = tgt['sub_labels'][obj_idx]
@@ -766,14 +894,20 @@ class CriterionHOI(nn.Module):
                 #     self.object_box_mismatch += 1
             if self.add_negative_category:
                 unmatched_pred_verb_scores = []
+                unmatched_pred_scores = []  # 用于保存 pred[i]['subject_score'] 和 pred[i]['object_score'] 的乘积
                 for i in range(len(pred)):
                     if i not in sub_inds:
                         unmatched_pred_verb_scores.append(pred[i]['relation_score'])
+                        unmatched_pred_scores.append(pred[i]['subject_score'] * pred[i]['object_score'])
 
                 if unmatched_pred_verb_scores:
+                    if len(unmatched_pred_verb_scores) > self.negative_sample_num:
+                        top_indices = sorted(range(len(unmatched_pred_scores)), key=lambda i: unmatched_pred_scores[i], reverse=True)[:10]
+                        # 筛选出对应的 unmatched_pred_verb_scores
+                        unmatched_pred_verb_scores = [unmatched_pred_verb_scores[i] for i in top_indices]
                     matched_pred_verb_scores += unmatched_pred_verb_scores
                     negative_labels = torch.zeros((len(unmatched_pred_verb_scores), self.num_category), device=self.device)
-                    negative_labels[:, -1] = 1  # 将标签设置为第118类
+                    negative_labels[:, 57] = 1  # 将标签设置为第57类, no_interaction
                     matched_tgt_verb_labels += [negative_labels]
 
             if self.positive_negative:

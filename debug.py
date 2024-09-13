@@ -6,6 +6,17 @@ checkpoint = torch.load(checkpoint_filename)
 outputs = checkpoint['outputs']
 targets = checkpoint['targets']
 cost_matrix = checkpoint['cost_matrix']
+cost_obj_class = checkpoint['cost_obj_class']
+cost_verb_class = checkpoint['cost_verb_class']
+cost_bbox = checkpoint['cost_bbox']
+cost_giou = checkpoint['cost_giou']
+
+print("cost_matrix: ", cost_matrix)
+print("cost_obj_class: ", cost_obj_class)
+print("cost_verb_class: ", cost_verb_class)
+print("cost_bbox: ", cost_bbox)
+print("cost_giou: ", cost_giou)
+
 print("outputs: ", outputs)
 # 检查outputs中的所有键是否包含nan
 nan_found = False

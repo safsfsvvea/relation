@@ -65,7 +65,7 @@ def load_and_visualize(json_file, output_dir):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    visualize_annotations(data[4430], output_dir)
+    visualize_annotations(data[8936], output_dir)
     # for info in tqdm(data, desc="Processing images"):
     #     visualize_annotations(info, output_dir)
 
