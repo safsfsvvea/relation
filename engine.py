@@ -699,11 +699,11 @@ def evaluate_hoi_single(model, postprocessors, data_loader, subject_category_id,
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
-    for samples, targets, rois_tensor, additional_info, detection_counts, detections in metric_logger.log_every(data_loader, 500, header):
+    for samples, targets, rois_tensor, additional_info, detection_counts, size, orig_size in metric_logger.log_every(data_loader, 500, header):
         samples = samples.to(device)
-        outputs = model(samples, rois_tensor, additional_info, detection_counts)
+        outputs = model(samples, rois_tensor, additional_info, detection_counts, size)
         
-        results = postprocessors(outputs, detections)
+        results = postprocessors(outputs, size, orig_size)
         preds = results
         gts = copy.deepcopy(targets)
 

@@ -42,12 +42,12 @@ class HOIModel(nn.Module):
                 nn.ReLU(),
                 nn.Linear(128, 256),
                 nn.ReLU(),
-                nn.Linear(256, feature_dim * 2),
+                nn.Linear(256, 512),
                 nn.ReLU(),
             )
             self.mbf = MultiBranchFusion(
                 feature_dim * 2,
-                feature_dim * 2, feature_dim * 2,
+                512, feature_dim * 2,
                 cardinality=16
             )
         if use_attention:
@@ -66,6 +66,29 @@ class HOIModel(nn.Module):
             nn.Dropout(dropout), 
             nn.Linear(256, self.num_category)
             )
+            # self.mlp = nn.Sequential(
+            #         nn.Linear(2 * feature_dim, 1024),
+            #         # nn.LayerNorm(1024),  
+            #         nn.ReLU(),
+            #         nn.Dropout(dropout), 
+            #         nn.Linear(1024, 512),
+            #         # nn.LayerNorm(512),  
+            #         nn.ReLU(),
+            #         nn.Dropout(dropout),  
+            #         nn.Linear(512, 256),
+            #         # nn.LayerNorm(256),  
+            #         nn.ReLU(),
+            #         nn.Dropout(dropout), 
+            #         nn.Linear(256, 128),
+            #         # nn.LayerNorm(128),  
+            #         nn.ReLU(),
+            #         nn.Dropout(dropout), 
+            #         nn.Linear(128, 64),
+            #         # nn.LayerNorm(64),  
+            #         nn.ReLU(),
+            #         nn.Dropout(dropout),  
+            #         nn.Linear(64, self.num_category)  
+            #     )
             # else:
             #     self.mlp = nn.Sequential(
             #         nn.Linear(feature_dim, 256),
@@ -800,6 +823,7 @@ class CriterionHOI(nn.Module):
         self.gamma = gamma
         self.loss_type = loss_type
         self.negative_sample_num = negative_sample_num
+        print("negative_sample_num: ", negative_sample_num)
         print("loss type: ", self.loss_type)
         print("self.alpha: ", self.alpha)
         print("self.gamma: ", self.gamma)
