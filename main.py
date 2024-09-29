@@ -67,7 +67,9 @@ def get_args_parser():
     parser.add_argument('--frozen_detection', action = 'store_true',
                         help='Freeze object detection part for RLIP.')
     #mlp
-    parser.add_argument('--position_bbox', action='store_true', help='use relative bbox position embedding.')
+    parser.add_argument('--position_bbox_dim', default=512, type=int, help="relative bbox position embedding dimension")
+    parser.add_argument('--position_bbox', action='store_true', help='use absolute bbox position embedding.')
+    parser.add_argument('--position_relative_bbox', action='store_true', help='use relative bbox position embedding.')
     parser.add_argument('--roi_size', default=7, type=int,
                         help="output size of roi_align")
     parser.add_argument('--negative_sample_num', default=10, type=int,
@@ -561,7 +563,7 @@ def main(args):
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention, position_bbox=args.position_bbox)
+    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention, position_bbox=args.position_bbox, position_relative_bbox=args.position_relative_bbox, position_bbox_dim=args.position_bbox_dim)
     # model = DDP(model, find_unused_parameters=True)
     # model = backbone_time(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
     matcher = HungarianMatcherHOI_det(

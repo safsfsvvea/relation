@@ -15,7 +15,7 @@ from models.position_encoding import PositionEmbeddingSine, PositionEmbeddingSin
 import torchvision.ops.boxes as box_ops
 
 class HOIModel(nn.Module):
-    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1, denoised=True, position_encoding_type=None, use_attention=True, use_CLS=True, roi_size=7, use_self_attention=True, position_bbox=True):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1, denoised=True, position_encoding_type=None, use_attention=True, use_CLS=True, roi_size=7, use_self_attention=True, position_bbox = True, position_relative_bbox=True, position_bbox_dim=512):
         super(HOIModel, self).__init__()
         self.backbone = backbone
         self.device = device
@@ -34,20 +34,27 @@ class HOIModel(nn.Module):
         self.use_CLS = use_CLS
         self.roi_size= roi_size
         self.use_self_attention = use_self_attention
-        self.position_bbox= position_bbox
-        if self.position_bbox:
-            # Map spatial encodings to the same dimension as appearance features
+        self.position_relative_bbox = position_relative_bbox
+        self.position_bbox = position_bbox
+        self.attention_pool = AttentionPool2d(
+            spacial_dim=roi_size,      # 7x7 spatial dimensions
+            embed_dim=feature_dim,      # embedding dimension (channels of input feature)
+            num_heads=num_heads,        # number of attention heads
+            output_dim=None     # output dimension, default to 768
+        )
+        if self.position_relative_bbox:
+            # Map spatial encodings to a specific dimension
             self.spatial_head = nn.Sequential(
                 nn.Linear(36, 128),
                 nn.ReLU(),
                 nn.Linear(128, 256),
                 nn.ReLU(),
-                nn.Linear(256, 512),
+                nn.Linear(256, position_bbox_dim),
                 nn.ReLU(),
             )
             self.mbf = MultiBranchFusion(
                 feature_dim * 2,
-                512, feature_dim * 2,
+                position_bbox_dim, feature_dim * 2,
                 cardinality=16
             )
         if use_attention:
@@ -66,36 +73,6 @@ class HOIModel(nn.Module):
             nn.Dropout(dropout), 
             nn.Linear(256, self.num_category)
             )
-            # self.mlp = nn.Sequential(
-            #         nn.Linear(2 * feature_dim, 1024),
-            #         # nn.LayerNorm(1024),  
-            #         nn.ReLU(),
-            #         nn.Dropout(dropout), 
-            #         nn.Linear(1024, 512),
-            #         # nn.LayerNorm(512),  
-            #         nn.ReLU(),
-            #         nn.Dropout(dropout),  
-            #         nn.Linear(512, 256),
-            #         # nn.LayerNorm(256),  
-            #         nn.ReLU(),
-            #         nn.Dropout(dropout), 
-            #         nn.Linear(256, 128),
-            #         # nn.LayerNorm(128),  
-            #         nn.ReLU(),
-            #         nn.Dropout(dropout), 
-            #         nn.Linear(128, 64),
-            #         # nn.LayerNorm(64),  
-            #         nn.ReLU(),
-            #         nn.Dropout(dropout),  
-            #         nn.Linear(64, self.num_category)  
-            #     )
-            # else:
-            #     self.mlp = nn.Sequential(
-            #         nn.Linear(feature_dim, 256),
-            #         nn.ReLU(),
-            #         nn.Dropout(dropout), 
-            #         nn.Linear(256, self.num_category)
-            #     )
         else:
             self.attention = None      
             if not use_LN:
@@ -195,134 +172,10 @@ class HOIModel(nn.Module):
         print("num_layers: ", num_layers)
         print("dropout: ", dropout)
         print("position_bbox: ", position_bbox)
-
+        print("position_relative_bbox: ", position_relative_bbox)
+        print("position_bbox_dim: ", position_bbox_dim)
         self.to(self.device)
 
-    def prepare_rois_cpu(self, detections_batch):
-        """
-        准备 ROI Align 所需的 RoIs 列表。
-
-        :param detections_batch: 每张图片的检测结果列表，每个元素是一个字典，包含 'boxes' 和 'labels'
-        :param targets: 每张图片的原始尺寸信息，通常是 {'height': ..., 'width': ...}
-        :return: ROIs 张量，形状为 [N, 5]，其中 N 是所有图片中检测框的总数， 额外的附加信息以及每张图片的检测框数量
-        """
-        all_boxes = []
-        all_labels = []
-        all_scores = []
-        image_indices = []
-
-        scale_factor = self.patch_size 
-
-        
-        def process_image(image_index, detections):
-            H, W = detections['size'].cpu()
-            if not detections['boxes'].nelement(): 
-                return None
-
-
-            boxes = detections['boxes'].cpu()
-            labels = detections['labels'].cpu()
-            scores = detections['scores'].cpu()
-
-            cx, cy, bw, bh = boxes.T
-            xmin = (cx - bw / 2) * W
-            ymin = (cy - bh / 2) * H
-            xmax = (cx + bw / 2) * W
-            ymax = (cy + bh / 2) * H
-            
-            scaled_xmin = xmin / scale_factor
-            scaled_ymin = ymin / scale_factor
-            scaled_xmax = xmax / scale_factor
-            scaled_ymax = ymax / scale_factor
-            
-            rois = torch.stack([torch.full_like(scaled_ymin, image_index), scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
-
-            return rois, labels, scores, torch.full((boxes.size(0),), image_index, dtype=torch.int64)
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(process_image, image_index, detections) 
-                    for image_index, detections in enumerate(detections_batch)]
-            results = [f.result() for f in futures]
-
-        for result in results:
-            if result is not None:
-                rois, labels, scores, img_indices = result
-                all_boxes.append(rois)
-                all_labels.append(labels)
-                all_scores.append(scores)
-                image_indices.append(img_indices)
-
-        if not all_boxes:
-            return torch.empty((0, 5), device=self.device), [], []
-        
-        rois_tensor = torch.cat(all_boxes)
-        labels_tensor = torch.cat(all_labels)
-        scores_tensor = torch.cat(all_scores)
-        image_indices_tensor = torch.cat(image_indices)
-
-        detection_counts = [len(detections['boxes']) for detections in detections_batch]
-
-        additional_info = [{'label': label.item(), 'bbox': [roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor, roi[4].item() * scale_factor], 'image_index': idx.item(), 'score': score.item()}
-                        for label, roi, idx, score in zip(labels_tensor, rois_tensor, image_indices_tensor, scores_tensor)]
-
-        return rois_tensor.float().to(self.device), additional_info, detection_counts
-
-    def prepare_rois(self, detections_batch, targets):
-        """
-        准备 ROI Align 所需的 RoIs 列表。
-
-        :param detections_batch: 每张图片的检测结果列表，每个元素是一个字典，包含 'boxes' 和 'labels'
-        :param targets: 每张图片的原始尺寸信息，通常是 {'height': ..., 'width': ...}
-        :return: ROIs 张量，形状为 [N, 5]，其中 N 是所有图片中检测框的总数， 额外的附加信息以及每张图片的检测框数量
-        """
-        all_boxes = []
-        all_labels = []
-        all_scores = []
-        image_indices = []
-
-        scale_factor = self.patch_size  
-
-        for image_index, (detections, target) in enumerate(zip(detections_batch, targets)):
-            H, W = detections['size']
-            if detections['boxes'].numel() == 0:  
-                continue
-
-            boxes = detections['boxes'].to(self.device)
-            labels = detections['labels'].to(self.device)
-            scores = detections['scores'].to(self.device)
-
-            cx, cy, bw, bh = boxes.T
-            xmin = (cx - bw / 2) * W
-            ymin = (cy - bh / 2) * H
-            xmax = (cx + bw / 2) * W
-            ymax = (cy + bh / 2) * H
-
-            scaled_xmin = xmin / scale_factor
-            scaled_ymin = ymin / scale_factor
-            scaled_xmax = xmax / scale_factor
-            scaled_ymax = ymax / scale_factor
-
-            rois = torch.stack([torch.full_like(scaled_ymin, image_index), scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
-
-            all_boxes.append(rois)
-            all_labels.append(labels)
-            all_scores.append(scores)
-            image_indices.append(torch.full((boxes.size(0),), image_index, dtype=torch.int64, device=self.device))
-
-        if not all_boxes:
-            return torch.empty((0, 5), device=self.device), [], []
-
-        rois_tensor = torch.cat(all_boxes)
-        labels_tensor = torch.cat(all_labels)
-        scores_tensor = torch.cat(all_scores)
-        image_indices_tensor = torch.cat(image_indices)
-
-        detection_counts = [len(detections['boxes']) for detections in detections_batch]
-
-        additional_info = [{'label': label.item(), 'bbox': [roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor, roi[4].item() * scale_factor], 'image_index': idx.item(), 'score': score.item()}
-                        for label, roi, idx, score in zip(labels_tensor, rois_tensor, image_indices_tensor, scores_tensor)]
-
-        return rois_tensor.float(), additional_info, detection_counts
     def separate_pooled_features(self, pooled_features, detection_counts):
         separated_features = []
         # separated_additional_info = []
@@ -389,7 +242,10 @@ class HOIModel(nn.Module):
             output_size = (1, 1)
         rois_tensor = [tensor.to(self.device) for tensor in rois_tensor]
         pooled_features = roi_align(backbone_features, rois_tensor, output_size)
-
+        # print("pooled_features shape: ", pooled_features.shape)
+        if self.position_bbox:
+            pooled_features = self.attention_pool(pooled_features)
+        # print("pooled_features out shape: ", pooled_features.shape)
         separated_features = self.separate_pooled_features(pooled_features, detection_counts)
         # 从 additional_info 中提取并区分 human 和 object 的 features
         all_pairs = []
@@ -405,7 +261,7 @@ class HOIModel(nn.Module):
             object_features = []
 
             for feat, det_info in zip(features, info):
-                # print("feat size: ", feat.shape)
+                print("feat size: ", feat.shape)
                 flattened_feat = feat.view(self.feature_dim, -1)  # [768, 49]
                 # if self.use_CLS:
                 #     flattened_feat = torch.cat([flattened_feat, CLS_token[i].unsqueeze(1)], dim=1)  # [768, 50]
@@ -489,7 +345,7 @@ class HOIModel(nn.Module):
                     
                     query_out, key_out = self.attention(query, key ,value)
                     pair_feature_out = torch.cat([query_out[-1, :, :], key_out[-1, :, :]], dim=-1)
-                if self.position_bbox:
+                if self.position_relative_bbox:
                     # Compute spatial features
                     box_pair_spatial = compute_spatial_encodings(
                         bbox_human, bbox_object, [(1, 1)]
@@ -659,6 +515,41 @@ def compute_spatial_encodings(
             torch.cat([f, torch.log(f + eps)], 1)
         )
     return torch.cat(features)
+
+class AttentionPool2d(nn.Module):
+    def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
+        super().__init__()
+        self.positional_embedding = nn.Parameter(torch.randn(spacial_dim ** 2 + 1, embed_dim) / embed_dim ** 0.5)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.c_proj = nn.Linear(embed_dim, output_dim or embed_dim)
+        self.num_heads = num_heads
+
+    def forward(self, x):
+        x = x.flatten(start_dim=2).permute(2, 0, 1)  # NCHW -> (HW)NC
+        x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (HW+1)NC
+        x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
+        x, _ = F.multi_head_attention_forward(
+            query=x[:1], key=x, value=x,
+            embed_dim_to_check=x.shape[-1],
+            num_heads=self.num_heads,
+            q_proj_weight=self.q_proj.weight,
+            k_proj_weight=self.k_proj.weight,
+            v_proj_weight=self.v_proj.weight,
+            in_proj_weight=None,
+            in_proj_bias=torch.cat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]),
+            bias_k=None,
+            bias_v=None,
+            add_zero_attn=False,
+            dropout_p=0,
+            out_proj_weight=self.c_proj.weight,
+            out_proj_bias=self.c_proj.bias,
+            use_separate_proj_weight=True,
+            training=self.training,
+            need_weights=False
+        )
+        return x.squeeze(0)
     
 class MultiheadAttentionBlock(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout=0.1):
