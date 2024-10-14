@@ -21,7 +21,127 @@ from torch.nn.utils.rnn import pad_packed_sequence, pad_sequence
 import torch.nn.functional as F
 import numpy as np
 import os
+# class HungarianMatcherHOI_pvic(nn.Module):
+#     def __init__(self, device, args, cost_obj_class=1.0, cost_verb_class=1.0, cost_bbox=1.0, cost_giou=1.0):
+#         super().__init__()
+#         self.device = device
+#         self.cost_obj_class = cost_obj_class
+#         self.cost_verb_class = cost_verb_class
+#         self.cost_bbox = cost_bbox
+#         self.cost_giou = cost_giou
+#         self.output_dir = args.output_dir
+#         print("self.cost_obj_class: ", self.cost_obj_class)
+#         print("self.cost_verb_class: ", self.cost_verb_class)
+#         print("self.cost_bbox: ", self.cost_bbox)
+#         print("self.cost_giou: ", self.cost_giou)
+#     @torch.no_grad()
+#     def forward(self, outputs, targets):
+#         batch_size = len(outputs)
+#         all_indices = []
+#         # print("outputs: ", outputs)
+#         # print("targets: ", targets)
+#         for idx in range(batch_size):
+#             pred = outputs[idx]
+#             tgt = targets[idx]
+#             # print("pred: ", pred)
+#             if len(pred) == 0:
+#                 all_indices.append(([], []))
+#                 continue
+#             # 将输出和目标的 bbox, logits 转化为 Tensor 并计算概率或使用已有分数
+#             pred_sub_boxes = torch.tensor([p['subject_bbox'] for p in pred], device=self.device)
+#             pred_obj_boxes = torch.tensor([p['object_bbox'] for p in pred], device=self.device)
+#             pred_obj_scores = torch.tensor([p['object_score'] for p in pred], device=self.device)
+#             pred_obj_labels = torch.tensor([p['object_category'] for p in pred], device=self.device)
+#             pred_verb_scores = torch.stack([p['relation_score'].to(self.device) for p in pred])
+#             # print("----------------------")
+#             # print("pred_sub_boxes: ", pred_sub_boxes)
+#             # print("pred_obj_boxes: ", pred_obj_boxes)
+#             # print("pred_obj_labels: ", pred_obj_labels)
+            
+#             # pred_verb_scores = torch.stack([torch.tensor(p['relation_score'], device=self.device).clone().detach() for p in pred])
+#             # print("tgt: ", tgt)
+#             tgt_sub_boxes = tgt['sub_boxes'].to(self.device)
+#             tgt_obj_boxes = tgt['obj_boxes'].to(self.device)
+#             tgt_obj_labels = tgt['obj_labels'].to(self.device)
+#             # print("tgt['verb_labels']: ", tgt['verb_labels'])
+#             tgt_verb_labels = tgt['verb_labels'].to(self.device)
+            
+#             H, W = tgt['size']
+#             tgt_sub_boxes = box_cxcywh_to_xyxy(tgt_sub_boxes) * torch.tensor([W, H, W, H], device=self.device)
+#             tgt_obj_boxes = box_cxcywh_to_xyxy(tgt_obj_boxes) * torch.tensor([W, H, W, H], device=self.device)
+#             # print("tgt_sub_boxes: ", tgt_sub_boxes)
+#             # print("tgt_obj_boxes: ", tgt_obj_boxes)
+#             # print("tgt_obj_labels: ", tgt_obj_labels)
+#             # print("----------------------")
+#             # print("tgt_obj_labels:", tgt_obj_labels)
+#             # print("pred_obj_scores:", pred_obj_scores)
+#             num_classes = 80  # Including no object class
+#             pred_obj_probs = torch.zeros(len(pred), num_classes)
+#             for i, score in enumerate(pred_obj_scores):
+#                 non_target_prob = (1 - score) / (num_classes - 1)
+#                 pred_obj_probs[i] = non_target_prob
+#                 pred_obj_probs[i, pred_obj_labels[i]-1] = score
+#             pred_obj_probs = torch.clamp(pred_obj_probs, min=1e-6, max=1-1e-6)  # 避免log(0)错误
+#             # print("pred_obj_probs: ", pred_obj_probs)
+#             # print("pred_obj_probs shape: ", pred_obj_probs.shape)
+#             pred_obj_logits = torch.log(pred_obj_probs / (1 - pred_obj_probs)).to(self.device)
+#             # print("pred_obj_logits: ", pred_obj_logits)
+#             # print("pred_obj_logits shape: ", pred_obj_logits.shape)
+#             # print("pred_obj_boxes: ", pred_obj_boxes)
 
+            
+#             cost_class = torch.zeros(len(pred), len(tgt_obj_labels), device=self.device)
+#             # for i, score in enumerate(pred_obj_logits):
+#             #     print("score device: ", score.device)
+#             #     print("tgt_obj_labels device: ", tgt_obj_labels.device)
+#             #     cost_class[i] = F.cross_entropy(score.unsqueeze(0).expand(len(tgt_obj_labels), -1), tgt_obj_labels.unsqueeze(0), reduction='none')
+#             for i in range(len(pred)):
+#                 # 这里每个预测对所有标签计算交叉熵，确保每个预测都与每个目标标签比较
+#                 expanded_logits = pred_obj_logits[i].unsqueeze(0).expand(len(tgt_obj_labels), -1)
+#                 cost_class[i] = F.cross_entropy(expanded_logits, tgt_obj_labels, reduction='none')
+#             # print("cost_class shape: ", cost_class.shape)
+#             cost_verb = torch.zeros(len(pred), len(tgt_verb_labels), device=self.device)
+#             for i, score in enumerate(pred_verb_scores):
+#                 # 扩展预测得分向量以匹配标签的批量大小
+#                 expanded_scores = score.unsqueeze(0).expand(len(tgt_verb_labels), -1)
+#                 # 计算每个预测与所有目标标签之间的成本
+#                 cost_verb[i] = F.binary_cross_entropy_with_logits(expanded_scores, tgt_verb_labels, reduction='none').sum(1)
+#             # print("cost_verb shape: ", cost_verb.shape)
+#             cost_bbox = torch.cdist(pred_sub_boxes, tgt_sub_boxes, p=1).to(self.device) + torch.cdist(pred_obj_boxes, tgt_obj_boxes, p=1).to(self.device)
+#             cost_giou = 1 - generalized_box_iou(pred_sub_boxes, tgt_sub_boxes).to(self.device) + \
+#                         1 - generalized_box_iou(pred_obj_boxes, tgt_obj_boxes).to(self.device)
+#             # print("cost_bbox shape: ", cost_bbox.shape)
+#             # print("cost_bbox: ", cost_bbox)
+#             # print("cost_giou shape: ", cost_giou.shape)
+#             # print("cost_giou: ", cost_giou)
+#             # 整合成本
+#             C = self.cost_obj_class * cost_class + self.cost_verb_class * cost_verb + self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
+#             C = C.cpu()
+#             # print("C shape: ", C.shape)
+#             # print("C: ", C)
+#             # 使用匈牙利算法进行匹配
+#             if not np.isfinite(C.numpy()).all():
+#                 print("Invalid entries found in cost matrix:", C)
+#             try:
+#                 sub_ind, obj_ind = linear_sum_assignment(C.numpy())
+#             except ValueError as e:
+#                 print(f"Exception caught: {e}")
+#                 checkpoint_filename = os.path.join(self.output_dir, 'debug_info.pth')
+#                 torch.save({
+#                     'outputs': outputs,
+#                     'targets': targets,
+#                     'cost_matrix': C,
+#                     'cost_obj_class': cost_class,
+#                     'cost_verb_class': cost_verb,
+#                     'cost_bbox': cost_bbox,
+#                     'cost_giou': cost_giou,
+#                 }, checkpoint_filename)
+#                 raise
+#             # sub_ind, obj_ind = linear_sum_assignment(C.numpy())
+#             all_indices.append((sub_ind, obj_ind))
+#         # print("all_indices: ", all_indices)
+#         return all_indices
+    
 class HungarianMatcherHOI_det(nn.Module):
     def __init__(self, device, args, cost_obj_class=1.0, cost_verb_class=1.0, cost_bbox=1.0, cost_giou=1.0):
         super().__init__()

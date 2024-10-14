@@ -279,6 +279,8 @@ class HICODetection(torch.utils.data.Dataset):
         
 class HICODetection_det(torch.utils.data.Dataset):
     def __init__(self, img_set, img_folder, anno_file, detection_results, transforms, num_queries, args = None):
+        self.pvic = args.pvic
+        print("self.pvic: ", self.pvic)
         self.img_set = img_set
         self.img_folder = img_folder
         self.score_threshold = args.score_threshold
@@ -422,10 +424,18 @@ class HICODetection_det(torch.utils.data.Dataset):
 
             obj_labels, verb_labels, sub_boxes, obj_boxes = [], [], [], []
             sub_obj_pairs = []
+            if self.pvic:
+                hoi_labels = []  # 新增的列表，用于存储每个HOI的种类
+                boxes_h_list = []  # 新增的列表，用于存储每个pvic格式的human bbox(包含重复)
+                boxes_o_list = []  # 新增的列表，用于存储每个pvic格式的object bbox
             for hoi in img_anno['hoi_annotation']:
                 if hoi['subject_id'] not in kept_box_indices or hoi['object_id'] not in kept_box_indices:
                     continue
                 sub_obj_pair = (hoi['subject_id'], hoi['object_id'])
+                if self.pvic:
+                    boxes_h_list.append(target['boxes'][kept_box_indices.index(hoi['subject_id'])])
+                    boxes_o_list.append(target['boxes'][kept_box_indices.index(hoi['object_id'])])
+                    hoi_labels.append(self._valid_verb_ids.index(hoi['category_id']))  # 添加对应的HOI种类
                 if sub_obj_pair in sub_obj_pairs:
                     verb_labels[sub_obj_pairs.index(sub_obj_pair)][self._valid_verb_ids.index(hoi['category_id'])] = 1
                 else:
@@ -452,6 +462,10 @@ class HICODetection_det(torch.utils.data.Dataset):
                 target['verb_labels'] = torch.zeros((0, len(self._valid_verb_ids)), dtype=torch.float32)
                 target['sub_boxes'] = torch.zeros((0, 4), dtype=torch.float32)
                 target['obj_boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+                if self.pvic:
+                    target['boxes_h'] = torch.zeros((0, 4), dtype=torch.float32)
+                    target['boxes_o'] = torch.zeros((0, 4), dtype=torch.float32)
+                    target['verbs'] = torch.zeros((0,), dtype=torch.int64)
             else:
                 target['obj_labels'] = torch.stack(obj_labels)
                 # I assume the sub_labels are not used in the following experiments.
@@ -464,6 +478,10 @@ class HICODetection_det(torch.utils.data.Dataset):
                 target['verb_labels'] = torch.as_tensor(verb_labels, dtype=torch.float32)
                 target['sub_boxes'] = torch.stack(sub_boxes)
                 target['obj_boxes'] = torch.stack(obj_boxes)
+                if self.pvic:
+                    target['boxes_h'] = torch.stack(boxes_h_list)
+                    target['boxes_o'] = torch.stack(boxes_o_list)
+                    target['verbs'] = torch.tensor(hoi_labels, dtype=torch.int64)
         else:
             target['filename'] = img_anno['file_name']
             target['boxes'] = boxes # 
@@ -481,8 +499,12 @@ class HICODetection_det(torch.utils.data.Dataset):
                 #     print(self._valid_verb_ids.index(hoi['category_id']))
             target['hois'] = torch.as_tensor(hois, dtype=torch.int64)
         # print("----------------------")
-        # print("target['sub_boxes'] shape: ", target['sub_boxes'].shape)
-        # print("target['obj_boxes'] shape: ", target['obj_boxes'].shape)
+        # print("target['boxes_h'] shape: ", target['boxes_h'].shape)
+        # print("target['boxes_o'] shape: ", target['boxes_o'].shape)
+        # print("target['verbs'] shape: ", target['verbs'].shape)
+        # print("target['boxes_h']: ", target['boxes_h'])
+        # print("target['boxes_o']: ", target['boxes_o'])
+        # print("target['verbs']: ", target['verbs'])
         # print("target['labels']: ", target['labels'])
         # print("target['labels'] shape: ", target['labels'].shape)
         # print("target['obj_labels']: ", target['obj_labels'])
@@ -528,9 +550,17 @@ class HICODetection_det(torch.utils.data.Dataset):
 
         rois = torch.stack([scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
 
-        additional_info = [{'label': label.item(), 'bbox': [roi[0].item() * scale_factor, roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor], 'score': score.item()}
+        if self.pvic:
+            additional_info = {
+            'boxes': [[roi[0].item() * scale_factor, roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor] for roi in rois],
+            'scores': [score.item() for score in scores],
+            'labels': [label.item() for label in labels],
+            
+        }
+        else:
+            additional_info = [{'label': label.item(), 'bbox': [roi[0].item() * scale_factor, roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor], 'score': score.item()}
                            for label, roi, score in zip(labels, rois, scores)]
-
+        
         detection_counts = len(boxes)
         return rois.float(), additional_info, detection_counts
     
@@ -610,6 +640,8 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
     def __init__(self, img_set, img_folder, anno_file, detection_results, transforms, num_queries, args = None):
         self.img_set = img_set
         self.img_folder = img_folder
+        self.pvic = args.pvic
+        print("self.pvic: ", self.pvic)
         self.thres_nms = args.thres_nms
         print("thres_nms: ", self.thres_nms)
         with open(anno_file, 'r') as f:
@@ -703,8 +735,7 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         else:
             classes = [self._valid_obj_ids.index(obj['category_id']) for obj in img_anno['annotations']]
         classes = torch.tensor(classes, dtype=torch.int64)
-        classes = torch.tensor(classes, dtype=torch.int64)
-        print("classes: ", classes)
+        # print("classes: ", classes)
         target = {}
         target['orig_size'] = torch.as_tensor([int(h), int(w)])
         target['size'] = torch.as_tensor([int(h), int(w)])
@@ -835,7 +866,7 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         
         target1['labels'] = target1['labels'] + 1
         rois_tensor, additional_info, detection_counts = self.prepare_rois(target1)
-        return img, target, rois_tensor, additional_info, detection_counts, target1
+        return img, target, rois_tensor, additional_info, detection_counts, target1['size'], target1['orig_size']
     
     def prepare_rois(self, detection):
         scale_factor = 14  # Assuming patch_size = 14
@@ -847,7 +878,21 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         boxes = detection['boxes']
         labels = detection['labels']
         scores = detection['scores']
+        # print("labels: ", labels)
+        if self.pvic:
+            # 找到 human (label == 0) 的索引
+            human_idx = (labels == 1).nonzero(as_tuple=True)[0]
+            # 找到非 human 的索引
+            non_human_idx = (labels != 1).nonzero(as_tuple=True)[0]
 
+            # 重新排列 labels, boxes, scores
+            sorted_labels = torch.cat([labels[human_idx], labels[non_human_idx]], dim=0)
+            sorted_boxes = torch.cat([boxes[human_idx], boxes[non_human_idx]], dim=0)
+            sorted_scores = torch.cat([scores[human_idx], scores[non_human_idx]], dim=0)
+
+            # 使用重新排序后的 boxes, labels, scores
+            labels, boxes, scores = sorted_labels, sorted_boxes, sorted_scores
+        
         cx, cy, bw, bh = boxes.T
         xmin = (cx - bw / 2) * W
         ymin = (cy - bh / 2) * H
@@ -860,8 +905,15 @@ class HICODetection_det_gt(torch.utils.data.Dataset):
         scaled_ymax = ymax / scale_factor
 
         rois = torch.stack([scaled_xmin, scaled_ymin, scaled_xmax, scaled_ymax], dim=1)
-
-        additional_info = [{'label': label.item(), 'bbox': [roi[0].item() * scale_factor, roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor], 'score': score.item()}
+        if self.pvic:
+            additional_info = {
+            'boxes': [[roi[0].item() * scale_factor, roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor] for roi in rois],
+            'scores': [score.item() for score in scores],
+            'labels': [label.item() for label in labels],
+            
+        }
+        else:
+            additional_info = [{'label': label.item(), 'bbox': [roi[0].item() * scale_factor, roi[1].item() * scale_factor, roi[2].item() * scale_factor, roi[3].item() * scale_factor], 'score': score.item()}
                            for label, roi, score in zip(labels, rois, scores)]
 
         detection_counts = len(boxes)

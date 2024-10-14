@@ -26,388 +26,6 @@ def tensor_to_list(tensor):
         return {k: tensor_to_list(v) for k, v in tensor.items()}
     else:
         return tensor
-def train_one_epoch_with_profiler(model, criterion, optimizer, data_loader, device, epoch, print_freq=100, tensorboard_writer=None):
-    model.train()
-    start_time = time.time()
-    epoch_loss = 0.0
-    num_batches = len(data_loader)
-    
-    progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}")
-    
-    # Initialize profiler
-    schedule = torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1)
-    profiler = torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-        schedule=schedule,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True
-    )
-    
-    profiler.start()
-
-    for batch_idx, (images, targets, detections) in progress_bar:
-        step_times = {}
-        
-        # Data transfer to GPU
-        transfer_start_event = torch.cuda.Event(enable_timing=True)
-        transfer_end_event = torch.cuda.Event(enable_timing=True)
-        
-        transfer_start_event.record()
-        images = images.to(device)
-        targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        transfer_end_event.record()
-        
-        torch.cuda.synchronize()
-        step_times['data_transfer'] = transfer_start_event.elapsed_time(transfer_end_event) / 1000.0
-        
-        # Forward pass
-        forward_start_event = torch.cuda.Event(enable_timing=True)
-        forward_end_event = torch.cuda.Event(enable_timing=True)
-        
-        forward_start_event.record()
-        optimizer.zero_grad()
-        out = model(images, targets, detections)
-        forward_end_event.record()
-        
-        torch.cuda.synchronize()
-        step_times['forward'] = forward_start_event.elapsed_time(forward_end_event) / 1000.0
-        
-        if not all(len(output) == 0 for output in out):
-            # Loss calculation
-            loss_start_event = torch.cuda.Event(enable_timing=True)
-            loss_end_event = torch.cuda.Event(enable_timing=True)
-            
-            loss_start_event.record()
-            loss = criterion(out, targets)
-            loss_end_event.record()
-            
-            torch.cuda.synchronize()
-            step_times['loss_calc'] = loss_start_event.elapsed_time(loss_end_event) / 1000.0
-            
-            # Backward pass
-            backward_start_event = torch.cuda.Event(enable_timing=True)
-            backward_end_event = torch.cuda.Event(enable_timing=True)
-            
-            backward_start_event.record()
-            loss.backward()
-            backward_end_event.record()
-            
-            torch.cuda.synchronize()
-            step_times['backward'] = backward_start_event.elapsed_time(backward_end_event) / 1000.0
-            
-            # Optimization step
-            optimize_start_event = torch.cuda.Event(enable_timing=True)
-            optimize_end_event = torch.cuda.Event(enable_timing=True)
-            
-            optimize_start_event.record()
-            optimizer.step()
-            optimize_end_event.record()
-            
-            torch.cuda.synchronize()
-            step_times['optimize'] = optimize_start_event.elapsed_time(optimize_end_event) / 1000.0
-        else:
-            loss = torch.tensor(0.0, device=device)
-            step_times['loss_calc'] = 0.0
-            step_times['backward'] = 0.0
-            step_times['optimize'] = 0.0
-        
-        epoch_loss += loss.item()
-        
-        # 打印每个batch的时间
-        print(f"Batch {batch_idx + 1}:")
-        print(f"  Data transfer: {step_times['data_transfer']:.4f} seconds")
-        print(f"  Forward pass: {step_times['forward']:.4f} seconds")
-        print(f"  Loss calculation: {step_times['loss_calc']:.4f} seconds")
-        print(f"  Backward pass: {step_times['backward']:.4f} seconds")
-        print(f"  Optimization: {step_times['optimize']:.4f} seconds")
-        
-        if (batch_idx + 1) % print_freq == 0:
-            avg_loss = epoch_loss / (batch_idx + 1)
-            elapsed_time = time.time() - start_time
-            eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
-            
-            progress_bar.set_postfix(loss=f"{avg_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")
-        
-        # 保存训练中间信息到tensorboard
-        if tensorboard_writer is not None:
-            global_step = epoch * num_batches + batch_idx
-            tensorboard_writer.add_scalar('train_loss', loss.item(), global_step=global_step)
-        
-        profiler.step()
-    
-    profiler.stop()
-
-    # 打印训练总时间
-    elapsed_time = time.time() - start_time
-    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average loss: {epoch_loss / num_batches:.4f}")
-    
-    return epoch_loss / num_batches
-def train_one_epoch_with_time(model, criterion, optimizer, data_loader, device, epoch, lr_scheduler=None, print_freq=100, accumulation_steps=32, grad_clip_val=1.0, tensorboard_writer=None, args=None):
-    # TODO: 优化成RLIP的样子
-    model.train()
-    # detector.model.train()
-    start_time = time.time()
-    
-    epoch_relation_loss  = 0.0
-    epoch_binary_loss = 0.0  # 新增，用于记录二分类损失
-    epoch_loss  = 0.0
-    
-    num_batches = len(data_loader)
-    
-    no_pairs_batches = 0  # 用于统计 "No pairs found for this batch." 出现的 batch 数量
-    no_results_images = 0  # 用于统计 "No results found for this image." 出现的图片数量
-    total_images = 0  # 用于统计总的图片数量
-    subject_label_mismatches = 0
-    object_label_mismatches = 0
-    subject_box_mismatches = 0
-    object_box_mismatches = 0
-    total_pairs = 0  # 总的 matcher pairs 数量
-    progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}", mininterval=1.0)
-    
-    scaler = GradScaler()  # 初始化 GradScaler
-    optimizer.zero_grad()
-    has_non_zero_loss = False  # 标志位，跟踪是否有非零损失的累积
-
-    forward_total_time = 0
-    dataloarder_total_time = 0
-    criterion_total_time = 0
-    backward_total_time = 0
-    optimizer_total_time = 0
-    tensorboard_total_time = 0
-    scheduler_total_time = 0
-    progress_bar_total_time = 0
-    
-    dataloarder_start_time = time.time()
-    for batch_idx, (images, targets, rois_tensor, additional_info, detection_counts, _) in progress_bar:
-        dataloarder_time = time.time() - dataloarder_start_time
-        dataloarder_total_time += dataloarder_time
-        images = images.to(device)
-        # input.append((images, targets, detections))
-        targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        # targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        # print("filename: ", targets[0]['filename'])
-        
-        with autocast():  # 使用 autocast 进行混合精度前向传播
-            forward_start_time = time.time()
-            out = model(images, rois_tensor, additional_info, detection_counts)
-            forward_time = time.time() - forward_start_time
-            forward_total_time += forward_time
-            # print("out: ", out)
-            # for image_results in out:
-            #     for hoi in image_results:
-            #         relation_score = torch.sigmoid(hoi['relation_score'])
-            #         max_score, max_index = torch.max(F.softmax(relation_score, dim=0), dim=0)
-            #         print(f"Highest probability relation score: {max_score.item()}, Index: {max_index.item()}")
-        if not all(len(output) == 0 for output in out):
-            with autocast():  # 使用 autocast 进行混合精度损失计算
-                criterion_start_time = time.time()
-                relation_loss, binary_loss = criterion(out, targets)
-                criterion_time = time.time() - criterion_start_time
-                criterion_total_time += criterion_time
-                
-                loss = relation_loss + binary_loss * 0.1
-            if loss > 0:
-                relation_loss = relation_loss / accumulation_steps  # 损失均摊到梯度累积步骤数
-                binary_loss = binary_loss / accumulation_steps  # 损失均摊到梯度累积步骤数
-                loss = loss / accumulation_steps  # 损失均摊到梯度累积步骤数
-                
-                backward_start_time = time.time()
-                scaler.scale(loss).backward()  
-                backward_time = time.time() - backward_start_time
-                backward_total_time += backward_time
-
-                has_non_zero_loss = True  # 设置标志位
-                
-                if (batch_idx + 1) % accumulation_steps == 0:
-                    optimizer_start_time = time.time()
-                    scaler.unscale_(optimizer)  # 取消缩放
-                    total_norm = clip_grad_norm_(model.parameters(), grad_clip_val)  # 计算梯度模并进行裁剪
-                    
-                    scaler.step(optimizer)  # 使用 GradScaler 进行优化步骤
-                    scaler.update()
-                    optimizer.zero_grad()  # 清空梯度
-                    optimizer_time = time.time() - optimizer_start_time
-                    optimizer_total_time += optimizer_time
-                    
-                    tensorboard_start_time = time.time()
-                    if tensorboard_writer is not None and batch_idx % 10 == 0:
-                        global_step = epoch * num_batches + batch_idx
-                        tensorboard_writer.add_scalar('grad_norm', total_norm, global_step)  # 将梯度模写入TensorBoard
-                    tensorboard_time = time.time() - tensorboard_start_time
-                    tensorboard_total_time += tensorboard_time
-                    
-                    scheduler_start_time = time.time()
-                    if args.schedule == "linear_with_warmup":
-                        lr_scheduler.step()
-                    scheduler_time = time.time() - scheduler_start_time
-                    scheduler_total_time += scheduler_time
-        else:
-            relation_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
-            binary_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
-            loss = relation_loss + binary_loss * 0.1
-            
-            backward_start_time = time.time()
-            scaler.scale(loss).backward() 
-            backward_time = time.time() - backward_start_time
-            backward_total_time += backward_time
-            
-        epoch_binary_loss += binary_loss.item() * accumulation_steps  # 修改，记录二分类损失
-        epoch_relation_loss += relation_loss.item() * accumulation_steps  # 修改，记录多分类损失
-        epoch_loss += loss.item() * accumulation_steps
-        
-        no_pairs_batches += model.no_pairs_count
-        no_results_images += model.no_results_count
-        total_images += len(targets)  # 更新总的图片数量
-        
-        # subject_label_mismatches += criterion.subject_label_mismatch
-        # object_label_mismatches += criterion.object_label_mismatch
-        # subject_box_mismatches += criterion.subject_box_mismatch
-        # object_box_mismatches += criterion.object_box_mismatch
-        # total_pairs += criterion.total_pairs
-        progress_bar_start_time = time.time()
-        if (batch_idx + 1) % print_freq == 0:
-            avg_binary_loss = epoch_binary_loss / (batch_idx + 1)  # 修改，计算平均二分类损失
-            avg_relation_loss = epoch_relation_loss / (batch_idx + 1)  # 修改，计算平均多分类损失
-            avg_loss = epoch_loss / (batch_idx + 1)
-            elapsed_time = time.time() - start_time
-            eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
-            progress_bar.set_postfix(total_loss=f"{avg_loss:.4f}", binary_loss=f"{avg_binary_loss:.4f}", relation_loss=f"{avg_relation_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")  # 修改，显示二分类和多分类损失
-        progress_bar_time = time.time() - progress_bar_start_time
-        progress_bar_total_time += progress_bar_time
-        
-        model.no_pairs_count = 0  # 重置计数器
-        model.no_results_count = 0  # 重置计数器
-        
-        # criterion.subject_label_mismatch = 0
-        # criterion.object_label_mismatch = 0
-        # criterion.subject_box_mismatch = 0
-        # criterion.object_box_mismatch = 0
-        # criterion.total_pairs = 0
-        
-        tensorboard_start_time = time.time()
-        if tensorboard_writer is not None and batch_idx % 10 == 0:
-            global_step = epoch * num_batches + batch_idx
-            tensorboard_writer.add_scalar('train_total_loss', loss.item(), global_step=global_step)  # 修改，记录总损失到Tensorboard
-            tensorboard_writer.add_scalar('train_binary_loss', binary_loss.item(), global_step=global_step)  # 修改，记录二分类损失到Tensorboard
-            tensorboard_writer.add_scalar('train_relation_loss', relation_loss.item(), global_step=global_step)  # 修改，记录多分类损失到Tensorboard
-        tensorboard_time = time.time() - tensorboard_start_time
-        tensorboard_total_time += tensorboard_time    
-        
-        dataloarder_start_time = time.time()
-        
-    if (batch_idx + 1) % accumulation_steps != 0 and has_non_zero_loss:
-        optimizer_start_time = time.time()
-        scaler.unscale_(optimizer)  # 取消缩放
-        total_norm = clip_grad_norm_(model.parameters(), grad_clip_val)  # 计算梯度模并进行裁剪
-
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad()
-        optimizer_time = time.time() - optimizer_start_time
-        optimizer_total_time += optimizer_time
-        
-        tensorboard_start_time = time.time()
-        if tensorboard_writer is not None:
-            global_step = epoch * num_batches + batch_idx
-            tensorboard_writer.add_scalar('grad_norm', total_norm, global_step)  # 将梯度模写入TensorBoard
-        tensorboard_time = time.time() - tensorboard_start_time
-        tensorboard_total_time += tensorboard_time 
-        
-        scheduler_start_time = time.time()
-        if args.schedule == "linear_with_warmup":
-            lr_scheduler.step()
-        scheduler_time = time.time() - scheduler_start_time
-        scheduler_total_time += scheduler_time
-     
-    scheduler_start_time = time.time()   
-    if args.schedule == "multistep":
-        lr_scheduler.step()
-    scheduler_time = time.time() - scheduler_start_time
-    scheduler_total_time += scheduler_time
-    # if lr_scheduler is not None:
-    #     lr_scheduler.step(epoch_loss  / num_batches)  # 根据当前 epoch 的平均损失更新学习率
-    # 打印训练总时间
-    elapsed_time = time.time() - start_time
-    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss  / num_batches:.4f}. Average relation loss: {epoch_relation_loss  / num_batches:.4f}. Average binary loss: {epoch_binary_loss  / num_batches:.4f}")
-    print("forward_total_time: ", forward_total_time)
-    print("dataloarder_total_time: ", dataloarder_total_time)
-    print("criterion_total_time: ", criterion_total_time)
-    print("backward_total_time: ", backward_total_time)
-    print("optimizer_total_time: ", optimizer_total_time)
-    print("tensorboard_total_time: ", tensorboard_total_time)
-    print("scheduler_total_time: ", scheduler_total_time)
-    print("progress_bar_total_time: ", progress_bar_total_time)
-    no_pairs_ratio = no_pairs_batches / num_batches
-    no_results_ratio = no_results_images / total_images
-    
-    # subject_label_mismatch_ratio = subject_label_mismatches / total_pairs if total_pairs else 0
-    # object_label_mismatch_ratio = object_label_mismatches / total_pairs if total_pairs else 0
-    # subject_box_mismatch_ratio = subject_box_mismatches / total_pairs if total_pairs else 0
-    # object_box_mismatch_ratio = object_box_mismatches / total_pairs if total_pairs else 0
-    
-    print(f"No pairs found ratio: {no_pairs_ratio:.4f}")
-    print(f"No results found ratio: {no_results_ratio:.4f}")
-    
-    # print(f"Subject label mismatch ratio: {subject_label_mismatch_ratio:.4f}")
-    # print(f"Object label mismatch ratio: {object_label_mismatch_ratio:.4f}")
-    # print(f"Subject box mismatch ratio: {subject_box_mismatch_ratio:.4f}")
-    # print(f"Object box mismatch ratio: {object_box_mismatch_ratio:.4f}")
-
-    if tensorboard_writer is not None:
-        tensorboard_writer.add_scalar('no_pairs_ratio', no_pairs_ratio, epoch)
-        tensorboard_writer.add_scalar('no_results_ratio', no_results_ratio, epoch)
-        
-        # tensorboard_writer.add_scalar('subject_label_mismatch_ratio', subject_label_mismatch_ratio, epoch)
-        # tensorboard_writer.add_scalar('object_label_mismatch_ratio', object_label_mismatch_ratio, epoch)
-        # tensorboard_writer.add_scalar('subject_box_mismatch_ratio', subject_box_mismatch_ratio, epoch)
-        # tensorboard_writer.add_scalar('object_box_mismatch_ratio', object_box_mismatch_ratio, epoch)
-    return epoch_loss / num_batches, epoch_relation_loss / num_batches, epoch_binary_loss  / num_batches
-
-def train_backbone_time(model, criterion, optimizer, data_loader, device, epoch, lr_scheduler=None, print_freq=100, accumulation_steps=32, grad_clip_val=1.0, tensorboard_writer=None, args=None):
-    # TODO: 优化成RLIP的样子
-    model.train()
-    model.backbone.eval()
-    epoch_relation_loss  = 0.0
-    epoch_binary_loss = 0.0  # 新增，用于记录二分类损失
-    epoch_loss  = 0.0
-    
-    num_batches = len(data_loader)
-
-    progress_bar = tqdm(enumerate(data_loader), total=num_batches, desc=f"Epoch {epoch}", mininterval=1.0)
-
-    optimizer.zero_grad()
-
-    dataloarder_total_time = 0
-    forward_total_time = 0
-    data_transfer_total_time = 0
-    start_time = time.time()
-    dataloarder_start_time = time.time()
-    for batch_idx, (images, targets, rois_tensor, additional_info, detection_counts, _) in progress_bar:
-        dataloarder_time = time.time() - dataloarder_start_time
-        dataloarder_total_time += dataloarder_time
-        
-        data_transfer_start_time = time.time()
-        images = images.to(device)
-        
-        # targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
-        data_transfer_time = time.time() - data_transfer_start_time
-        data_transfer_total_time += data_transfer_time
-        
-        with autocast():  # 使用 autocast 进行混合精度前向传播
-            forward_start_time = time.time()
-            out = model(images, rois_tensor, additional_info, detection_counts)
-            forward_time = time.time() - forward_start_time
-            forward_total_time += forward_time
-            
-        dataloarder_start_time = time.time()
-    elapsed_time = time.time() - start_time
-    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds.")
-    print("forward_total_time: ", forward_total_time)    
-    print("dataloarder_total_time: ", dataloarder_total_time)  
-    print("data_transfer_total_time: ", data_transfer_total_time)  
-    return epoch_loss / num_batches, epoch_relation_loss / num_batches, epoch_binary_loss  / num_batches
 
 def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, device, epoch, lr_scheduler=None, print_freq=100, accumulation_steps=16, grad_clip_val=1.0, tensorboard_writer=None, args=None):
     # TODO: 优化成RLIP的样子
@@ -443,10 +61,30 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
             images = images.to(device)
             targets = [{k: v.to(device) for k, v in t.items() if k not in ['filename', 'image_id', 'obj_classes', 'verb_classes']} for t in targets]
             # targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in t.items() if k not in ['image_id', 'obj_classes', 'verb_classes']} for t in targets]
-            
+            # if args.pvic:
+            #     with accelerator.autocast():
+            #         loss = model(images, rois_tensor, additional_info, detection_counts, size, targets)
+            #         # print("loss: ", loss)
+            #     if loss > 0:
+            #         accelerator.backward(loss)
+                    
+            #         total_norm = accelerator.clip_grad_norm_(model.parameters(), grad_clip_val)  # 计算梯度模并进行裁剪
+            #         print("total_norm: ", total_norm)
+            #         total_norm_after = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
+            #         print(f"After clipping: {total_norm_after}")
+            #         optimizer.step()
+                    
+            #         if tensorboard_writer is not None:
+            #             global_step = epoch * num_batches + batch_idx
+            #             tensorboard_writer.add_scalar('grad_norm', total_norm, global_step)  # 将梯度模写入TensorBoard
+            #         if args.schedule == "linear_with_warmup":
+            #             lr_scheduler.step()
+            #         optimizer.zero_grad()
+            # else:
             with accelerator.autocast():
                 # forward_start_time = time.time()
                 out = model(images, rois_tensor, additional_info, detection_counts, size)
+                # print("out: ", out)
                 # forward_time = time.time() - forward_start_time
                 # forward_total_time += forward_time
 
@@ -471,8 +109,8 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
                 relation_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
                 binary_loss = torch.tensor(0.0, device=device, requires_grad=True)  # 确保需要梯度
                 loss = relation_loss + binary_loss * 0.1
-            epoch_binary_loss += binary_loss.item()  # 修改，记录二分类损失
-            epoch_relation_loss += relation_loss.item()  # 修改，记录多分类损失
+            # epoch_binary_loss += binary_loss.item()  # 修改，记录二分类损失
+            # epoch_relation_loss += relation_loss.item()  # 修改，记录多分类损失
             epoch_loss += loss.item()
             
             # no_pairs_batches += model.module.no_pairs_count
@@ -488,12 +126,12 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
             # total_pairs += criterion.total_pairs
             
             if (batch_idx + 1) % print_freq == 0:
-                avg_binary_loss = epoch_binary_loss / (batch_idx + 1)  # 修改，计算平均二分类损失
-                avg_relation_loss = epoch_relation_loss / (batch_idx + 1)  # 修改，计算平均多分类损失
+                # avg_binary_loss = epoch_binary_loss / (batch_idx + 1)  # 修改，计算平均二分类损失
+                # avg_relation_loss = epoch_relation_loss / (batch_idx + 1)  # 修改，计算平均多分类损失
                 avg_loss = epoch_loss / (batch_idx + 1)
                 elapsed_time = time.time() - start_time
                 eta = elapsed_time / (batch_idx + 1) * (num_batches - batch_idx - 1)
-                progress_bar.set_postfix(total_loss=f"{avg_loss:.4f}", binary_loss=f"{avg_binary_loss:.4f}", relation_loss=f"{avg_relation_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")  # 修改，显示二分类和多分类损失
+                progress_bar.set_postfix(total_loss=f"{avg_loss:.4f}", time=f"{elapsed_time:.2f}s", eta=f"{eta:.2f}s")  # 修改，显示二分类和多分类损失
             
             # model.module.no_pairs_count = 0  # 重置计数器
             # model.module.no_results_count = 0  # 重置计数器
@@ -510,8 +148,8 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
             if tensorboard_writer is not None:
                 global_step = epoch * num_batches + batch_idx
                 tensorboard_writer.add_scalar('train_total_loss', loss.item(), global_step=global_step)  # 修改，记录总损失到Tensorboard
-                tensorboard_writer.add_scalar('train_binary_loss', binary_loss.item(), global_step=global_step)  # 修改，记录二分类损失到Tensorboard
-                tensorboard_writer.add_scalar('train_relation_loss', relation_loss.item(), global_step=global_step)  # 修改，记录多分类损失到Tensorboard
+                # tensorboard_writer.add_scalar('train_binary_loss', binary_loss.item(), global_step=global_step)  # 修改，记录二分类损失到Tensorboard
+                # tensorboard_writer.add_scalar('train_relation_loss', relation_loss.item(), global_step=global_step)  # 修改，记录多分类损失到Tensorboard
                 
     if args.schedule == "multistep":
         lr_scheduler.step()
@@ -519,7 +157,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
     #     lr_scheduler.step(epoch_loss  / num_batches)  # 根据当前 epoch 的平均损失更新学习率
     # 打印训练总时间
     elapsed_time = time.time() - start_time
-    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss  / num_batches:.4f}. Average relation loss: {epoch_relation_loss  / num_batches:.4f}. Average binary loss: {epoch_binary_loss  / num_batches:.4f}")
+    print(f"Epoch {epoch} completed in {elapsed_time:.2f} seconds. Average total loss: {epoch_loss  / num_batches:.4f}.")
     # print("forward_total_time: ", forward_total_time)
     no_pairs_ratio = no_pairs_batches / num_batches
     no_results_ratio = no_results_images / total_images
@@ -545,7 +183,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, accelerator, devic
         # tensorboard_writer.add_scalar('object_label_mismatch_ratio', object_label_mismatch_ratio, epoch)
         # tensorboard_writer.add_scalar('subject_box_mismatch_ratio', subject_box_mismatch_ratio, epoch)
         # tensorboard_writer.add_scalar('object_box_mismatch_ratio', object_box_mismatch_ratio, epoch)
-    return epoch_loss / num_batches, epoch_relation_loss / num_batches, epoch_binary_loss  / num_batches
+    return epoch_loss / num_batches
 
 
 @torch.no_grad()
@@ -572,7 +210,7 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader, subject_categ
         # print(targets[0]['size'])
         # print('')
         samples = samples.to(device)
-
+        # print("targets: ", targets)
         # input.append((samples, targets, detections))
         
         outputs = model(samples, rois_tensor, additional_info, detection_counts, size)

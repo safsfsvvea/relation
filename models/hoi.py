@@ -13,7 +13,519 @@ from util.box_ops import box_cxcywh_to_xyxy
 from torchvision.ops import box_iou
 from models.position_encoding import PositionEmbeddingSine, PositionEmbeddingSineHW
 import torchvision.ops.boxes as box_ops
+import math
+import torch.distributed as dist
+from models.transformers import (
+    TransformerEncoder,
+    TransformerDecoder,
+    TransformerDecoderLayer,
+    SwinTransformer,
+)
+from models.ops import (
+    binary_focal_loss_with_logits,
+    compute_spatial_encodings,
+    prepare_region_proposals,
+    associate_with_ground_truth,
+    compute_prior_scores,
+    compute_sinusoidal_pe
+)
+from torchvision.ops import FeaturePyramidNetwork
+from collections import OrderedDict
 
+class Permute(nn.Module):
+    def __init__(self, dims: List[int]):
+        super().__init__()
+        self.dims = dims
+    def forward(self, x: Tensor) -> Tensor:
+        return x.permute(self.dims)
+
+class FeatureHead(nn.Module):
+    def __init__(self, dim, dim_backbone, return_layer, num_layers):
+        super().__init__()
+        self.dim = dim
+        self.dim_backbone = dim_backbone
+        self.return_layer = return_layer
+
+        in_channel_list = [
+            int(dim_backbone * 2 ** i)
+            for i in range(return_layer + 1, 1)
+        ]
+        self.fpn = FeaturePyramidNetwork(in_channel_list, dim)
+        self.layers = nn.Sequential(
+            Permute([0, 2, 3, 1]),
+            SwinTransformer(dim, num_layers)
+        )
+    def forward(self, x):
+        pyramid = OrderedDict(
+            (f"{i}", x[i].tensors)
+            for i in range(self.return_layer, 0)
+        )
+        mask = x[self.return_layer].mask
+        x = self.fpn(pyramid)[f"{self.return_layer}"]
+        x = self.layers(x)
+        return x, mask
+
+class MultiModalFusion(nn.Module):
+    def __init__(self, fst_mod_size, scd_mod_size, repr_size):
+        super().__init__()
+        self.fc1 = nn.Linear(fst_mod_size, repr_size)
+        self.fc2 = nn.Linear(scd_mod_size, repr_size)
+        self.ln1 = nn.LayerNorm(repr_size)
+        self.ln2 = nn.LayerNorm(repr_size)
+
+        mlp = []
+        repr_size = [2 * repr_size, int(repr_size * 1.5), repr_size]
+        for d_in, d_out in zip(repr_size[:-1], repr_size[1:]):
+            mlp.append(nn.Linear(d_in, d_out))
+            mlp.append(nn.ReLU())
+        self.mlp = nn.Sequential(*mlp)
+
+    def forward(self, x: Tensor, y: Tensor) -> Tensor:
+        x = self.ln1(self.fc1(x))
+        y = self.ln2(self.fc2(y))
+        z = F.relu(torch.cat([x, y], dim=-1))
+        z = self.mlp(z)
+        return z
+
+class HumanObjectMatcher(nn.Module):
+    def __init__(self, repr_size, num_verbs, obj_to_verb, dropout=.1, human_idx=0):
+        super().__init__()
+        self.repr_size = repr_size
+        self.num_verbs = num_verbs
+        self.human_idx = human_idx
+        self.obj_to_verb = obj_to_verb
+
+        self.ref_anchor_head = nn.Sequential(
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 2)
+        )
+        self.spatial_head = nn.Sequential(
+            nn.Linear(36, 128), nn.ReLU(),
+            nn.Linear(128, 256), nn.ReLU(),
+            nn.Linear(256, repr_size), nn.ReLU(),
+        )
+        self.encoder = TransformerEncoder(num_layers=2, dropout=dropout)
+        self.mmf = MultiModalFusion(512, repr_size, repr_size)
+
+    def check_human_instances(self, labels):
+        is_human = labels == self.human_idx
+        n_h = torch.sum(is_human)
+        if not torch.all(labels[:n_h]==self.human_idx):
+            raise AssertionError("Human instances are not permuted to the top!")
+        return n_h
+
+    def compute_box_pe(self, boxes, embeds, image_size):
+        bx_norm = boxes / image_size[[1, 0, 1, 0]]
+        bx_c = (bx_norm[:, :2] + bx_norm[:, 2:]) / 2
+        b_wh = bx_norm[:, 2:] - bx_norm[:, :2]
+
+        c_pe = compute_sinusoidal_pe(bx_c[:, None], 20).squeeze(1)
+        wh_pe = compute_sinusoidal_pe(b_wh[:, None], 20).squeeze(1)
+
+        box_pe = torch.cat([c_pe, wh_pe], dim=-1)
+
+        # Modulate the positional embeddings with box widths and heights by
+        # applying different temperatures to x and y
+        ref_hw_cond = self.ref_anchor_head(embeds).sigmoid()    # n_query, 2
+        # Note that the positional embeddings are stacked as [pe(y), pe(x)]
+        c_pe[..., :128] *= (ref_hw_cond[:, 1] / b_wh[:, 1]).unsqueeze(-1)
+        c_pe[..., 128:] *= (ref_hw_cond[:, 0] / b_wh[:, 0]).unsqueeze(-1)
+
+        return box_pe, c_pe
+
+    def forward(self, region_props, image_sizes, device):
+        ho_queries = []
+        paired_indices = []
+        prior_scores = []
+        object_types = []
+        positional_embeds = []
+        for i, rp in enumerate(region_props):
+            if not rp:
+                ho_queries.append(torch.zeros(0, self.repr_size, device=device))
+                paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
+                prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
+                object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
+                positional_embeds.append({})
+                continue
+            boxes, scores, labels, embeds = rp.values()
+            # print("boxes: ", boxes.shape)
+            # print("scores shape: ", scores.shape)
+            # print("scores: ", scores)
+            # print("labels: ", labels)
+            # print("labels shape: ", labels.shape)
+            # print("embeds: ", embeds.shape)
+            # print("labels check: ", labels)
+            nh = self.check_human_instances(labels)
+            n = len(boxes)
+            # Enumerate instance pairs
+            x, y = torch.meshgrid(
+                torch.arange(n, device=device),
+                torch.arange(n, device=device)
+            )
+            x_keep, y_keep = torch.nonzero(torch.logical_and(x != y, x < nh)).unbind(1)
+            # Skip image when there are no valid human-object pairs
+            if len(x_keep) == 0:
+                ho_queries.append(torch.zeros(0, self.repr_size, device=device))
+                paired_indices.append(torch.zeros(0, 2, device=device, dtype=torch.int64))
+                prior_scores.append(torch.zeros(0, 2, self.num_verbs, device=device))
+                object_types.append(torch.zeros(0, device=device, dtype=torch.int64))
+                positional_embeds.append({})
+                continue
+            x = x.flatten(); y = y.flatten()
+            # Compute spatial features
+            pairwise_spatial = compute_spatial_encodings(
+                [boxes[x],], [boxes[y],], [image_sizes[i],]
+            )
+            pairwise_spatial = self.spatial_head(pairwise_spatial)
+            pairwise_spatial_reshaped = pairwise_spatial.reshape(n, n, -1)
+
+            box_pe, c_pe = self.compute_box_pe(boxes, embeds, image_sizes[i])
+            embeds, _ = self.encoder(embeds.unsqueeze(1), box_pe.unsqueeze(1))
+            embeds = embeds.squeeze(1)
+            # Compute human-object queries
+            ho_q = self.mmf(
+                torch.cat([embeds[x_keep], embeds[y_keep]], dim=1),
+                pairwise_spatial_reshaped[x_keep, y_keep]
+            )
+            # Append matched human-object pairs
+            ho_queries.append(ho_q)
+            paired_indices.append(torch.stack([x_keep, y_keep], dim=1))
+            prior_scores.append(compute_prior_scores(
+                x_keep, y_keep, scores, labels, self.num_verbs, self.training,
+                self.obj_to_verb
+            ))
+            object_types.append(labels[y_keep])
+            positional_embeds.append({
+                "centre": torch.cat([c_pe[x_keep], c_pe[y_keep]], dim=-1).unsqueeze(1),
+                "box": torch.cat([box_pe[x_keep], box_pe[y_keep]], dim=-1).unsqueeze(1)
+            })
+
+        return ho_queries, paired_indices, prior_scores, object_types, positional_embeds
+
+class PViC(nn.Module):
+    def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, num_heads=8, num_layers=1, dropout=0.1, denoised=True, roi_size=7, raw_lambda=2.8, args=None):
+        super(PViC, self).__init__()
+        self.backbone = backbone
+        self.device = device
+        self.num_objects = num_objects
+        self.feature_dim = feature_dim
+        self.person_category_id = person_category_id
+        self.patch_size = patch_size
+        self.no_pairs_count = 0  # 用于统计 "No pairs found for this batch." 的计数
+        self.no_results_count = 0  # 用于统计 "No results found for this image." 的计数
+        self.num_category = 117
+        self.denoised = denoised
+        self.position_encoding = None
+        self.use_CLS = use_CLS
+        self.roi_size= roi_size
+        self.use_self_attention = use_self_attention
+        self.position_relative_bbox = position_relative_bbox
+        self.position_bbox = position_bbox
+        self.raw_lambda = raw_lambda
+        self.alpha = args.alpha
+        self.gamma = args.gamma
+        self.ref_anchor_head = nn.Sequential(
+                nn.Linear(256, 256), nn.ReLU(),
+                nn.Linear(256, 2)
+            )
+        self.ho_matcher = HumanObjectMatcher(
+            repr_size=384,
+            num_verbs=117,
+            obj_to_verb=args.object_to_verb,
+            dropout=dropout,
+            human_idx = 0
+        )
+        self.feature_head = FeatureHead(
+            256, feature_dim,
+            -1, 1
+        )
+        self.kv_pe = PositionEmbeddingSine(128, 20, normalize=True)
+        decoder_layer = TransformerDecoderLayer(
+            q_dim=384, kv_dim=256,
+            ffn_interm_dim=384 * 4,
+            num_heads=num_heads, dropout=dropout
+        )
+        self.decoder = TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=2
+        )
+        self.binary_classifier = nn.Linear(384, self.num_category)
+        self.attention_pool = AttentionPool2d(
+            spacial_dim=roi_size,      # 7x7 spatial dimensions
+            embed_dim=feature_dim,      # embedding dimension (channels of input feature)
+            num_heads=num_heads,        # number of attention heads
+            output_dim=256     # output dimension, default to 768
+        )
+        
+        self.to(self.device)
+
+    def compute_box_pe(self, boxes, embeds, image_size):
+        bx_norm = boxes / image_size[[1, 0, 1, 0]]
+        bx_c = (bx_norm[:, :2] + bx_norm[:, 2:]) / 2
+        b_wh = bx_norm[:, 2:] - bx_norm[:, :2]
+
+        c_pe = compute_sinusoidal_pe(bx_c[:, None], 20).squeeze(1)
+        wh_pe = compute_sinusoidal_pe(b_wh[:, None], 20).squeeze(1)
+
+        box_pe = torch.cat([c_pe, wh_pe], dim=-1)
+
+        # Modulate the positional embeddings with box widths and heights by
+        # applying different temperatures to x and y
+        ref_hw_cond = self.ref_anchor_head(embeds).sigmoid()    # n_query, 2
+        # Note that the positional embeddings are stacked as [pe(y), pe(x)]
+        c_pe[..., :128] *= (ref_hw_cond[:, 1] / b_wh[:, 1]).unsqueeze(-1)
+        c_pe[..., 128:] *= (ref_hw_cond[:, 0] / b_wh[:, 0]).unsqueeze(-1)
+
+        return box_pe, c_pe
+    
+    def separate_pooled_features(self, pooled_features, detection_counts):
+        separated_features = []
+        # separated_additional_info = []
+        current_idx = 0
+
+        for count in detection_counts:
+            if count > 0:
+                separated_features.append(pooled_features[current_idx:current_idx + count])
+                # separated_additional_info.append(additional_info[current_idx:current_idx + count])
+            else:
+                separated_features.append(torch.empty(0, pooled_features.size(1)))
+                # separated_additional_info.append([])
+            current_idx += count
+
+        return separated_features
+    
+    def generate_attention_mask(self, num_human=49, num_object=49, num_cls=1):
+        total_features = num_human + num_object + num_cls
+        attn_mask = torch.zeros((total_features, total_features), dtype=torch.bool, device=self.device)
+
+        # Mask掉human内部、object内部以及cls token之间的注意力
+        attn_mask[:num_human, :num_human] = True
+        attn_mask[num_human:num_human+num_object, num_human:num_human+num_object] = True
+        if num_cls > 0:
+            attn_mask[-num_cls:, -num_cls:] = True
+
+        return attn_mask
+    
+    def compute_classification_loss(self, logits, prior, labels):
+        # print("----------------")
+        # print("prior1 len: ", len(prior))
+        # print("logits1 shape: ", logits.shape)
+        # print("labels1 shape: ", labels.shape)
+        prior = torch.cat(prior, dim=0).prod(1)
+        # print("prior2 shape: ", prior.shape)
+        x, y = torch.nonzero(prior).unbind(1)
+        # print("x shape: ", x.shape)
+        # print("y shape: ", y.shape)
+        logits = logits[:, x, y]
+        # print("logits2 shape: ", logits.shape)
+        prior = prior[x, y]
+        # print("prior3 shape: ", prior.shape)
+        labels = labels[None, x, y].repeat(len(logits), 1)
+        # print("labels2 shape: ", labels.shape)
+
+        n_p = labels.sum()
+        if dist.is_initialized():
+            print("multi-gpu!!!")
+            world_size = dist.get_world_size()
+            n_p = torch.as_tensor([n_p], device='cuda')
+            dist.barrier()
+            dist.all_reduce(n_p)
+            n_p = (n_p / world_size).item()
+        
+        # print("prior: ", prior)
+        # print("logits: ", logits)
+        # print("labels: ", labels)
+        # print("prior shape: ", prior.shape)
+        # print("logits shape: ", logits.shape)
+        # print("labels shape: ", labels.shape)
+        
+        loss = binary_focal_loss_with_logits(
+            torch.log(
+                prior / (1 + torch.exp(-logits) - prior) + 1e-8
+            ), labels, reduction='mean',
+            alpha=self.alpha, gamma=self.gamma
+        )
+        # print("loss: ", loss)
+        # print("----------------")
+        return loss / n_p
+    
+    def postprocessing(self,
+            boxes, paired_inds, object_types,
+            logits, prior, image_sizes
+        ):
+        n = [len(p_inds) for p_inds in paired_inds]
+        logits = logits.split(n)
+
+        detections = []
+        for bx, p_inds, objs, lg, pr, size in zip(
+            boxes, paired_inds, object_types,
+            logits, prior, image_sizes
+        ):
+            pr = pr.prod(1)
+            x, y = torch.nonzero(pr).unbind(1)
+            scores = lg[x, y].sigmoid() * pr[x, y].pow(self.raw_lambda)
+            detections.append(dict(
+                boxes=bx, pairing=p_inds[x], scores=scores,
+                labels=y, objects=objs[x], size=size, x=x
+            ))
+
+        return detections
+    def convert_output(self, logits, paired_inds, object_types, additional_info):
+        output = []
+        # print("len(paired_inds): ", len(paired_inds))
+        for b in range(len(paired_inds)):
+            batch_output = []
+            if len(paired_inds[b]) == 0:  # 如果没有配对
+                output.append(batch_output)  # 直接添加空的 batch_output
+                continue  # 跳过后续处理
+            for i, pair_idx in enumerate(paired_inds[b]):
+                subject_idx, object_idx = pair_idx
+                
+                # 创建每个配对的字典
+                subject_bbox = additional_info[b]['boxes'][subject_idx]
+                object_bbox = additional_info[b]['boxes'][object_idx]
+                subject_score = additional_info[b]['scores'][subject_idx]
+                object_score = additional_info[b]['scores'][object_idx]
+                relation_score = logits[-1, i, :]  # 假设使用logits的平均值作为relation_score
+                # print("object_idx: ", object_idx)
+                # print("object_types[b][object_idx]: ", object_types[b][object_idx])
+                entry = {
+                    'subject_category': 1,
+                    'subject_score': subject_score.item(),  
+                    'subject_bbox': subject_bbox.tolist(),
+                    'object_category': object_types[b][i].item() + 1,
+                    'object_score': object_score.item(),  
+                    'object_bbox': object_bbox.tolist(),
+                    'relation_score': relation_score,
+                    'binary_score': None
+                }
+                batch_output.append(entry)
+            output.append(batch_output)
+    
+        return output
+    def forward(self, nested_tensor: NestedTensor, rois_tensor, additional_info, detection_counts, size, targets=None):
+        images = nested_tensor.tensors
+        # print("image size", images.size())
+        mask = nested_tensor.mask
+        batch_size = images.size(0)
+
+        batch_denoised_features, raw_features, CLS_token = self.backbone(images)
+        # print("batch_denoised_features: ", batch_denoised_features.shape)
+        # print("raw_features: ", raw_features.shape)
+        if self.denoised:
+            backbone_features = batch_denoised_features
+        else:
+            backbone_features = raw_features
+        backbone_features = backbone_features.permute(0, 3, 1, 2)
+        
+        # 将 mask 调整到与 backbone_features 一样的尺度
+        # mask 原始大小是 [B, H, W]，需要先增加一个维度变为 [B, 1, H, W] 以便于插值
+        mask = mask.unsqueeze(1).float()  # 增加一个维度并转换为 float 类型
+
+        # 进行最近邻插值，将 mask 调整到与 backbone_features 一样的尺度
+        mask = F.interpolate(mask, size=backbone_features.shape[-2:], mode='nearest')
+
+        # 调整后的 mask 变回 [B, H', W'] 形式
+        mask = mask.squeeze(1).bool()
+        
+        nested_backbone_feature = NestedTensor(backbone_features, mask)
+        dino_features = [nested_backbone_feature]
+        # print("nested_backbone_feature tensors: ", nested_backbone_feature.tensors.shape) # torch.Size([1, 256, 200, 300])
+        # print("nested_backbone_feature mask: ", nested_backbone_feature.mask.shape) # torch.Size([1, 200, 300])
+        
+        output_size = (self.roi_size, self.roi_size)
+
+        rois_tensor = [tensor.to(self.device) for tensor in rois_tensor]
+        pooled_features = roi_align(backbone_features, rois_tensor, output_size)
+        # print("pooled_features shape: ", pooled_features.shape)
+        pooled_features = self.attention_pool(pooled_features)
+        # print("pooled_features out shape: ", pooled_features.shape)
+        separated_features = self.separate_pooled_features(pooled_features, detection_counts)
+        # print("separated_features: ", len(separated_features))
+        # print("additional_info: ", additional_info)
+        for info in additional_info:
+            if not info:  # 如果 info 为空，则跳过当前循环
+                print("info is empty, skipping...")
+                continue  # 继续下一次循环
+            # print("info: ", info)
+            info['boxes'] = torch.tensor(info['boxes']).to(self.device)  
+            info['scores'] = torch.tensor(info['scores']).to(self.device) 
+            info['labels'] = torch.tensor(info['labels']).to(self.device) - 1
+        for i in range(len(additional_info)):
+            if not additional_info[i]:
+                print("additional_info[i] is empty, skipping...")
+                continue  # 继续下一次循环
+            additional_info[i]['embeds'] = separated_features[i]
+        # boxes = [r['boxes'] for r in additional_info]
+        # scores = [r['scores'] for r in additional_info]
+        # print("boxes[0].shape: ", boxes[0].shape)
+        (
+            ho_queries,
+            paired_inds, prior_scores,
+            object_types, positional_embeds
+        ) = self.ho_matcher(additional_info, size, self.device)
+        # print("len ho_queries: ", len(ho_queries)) # 1
+        # print("ho_queries: ", ho_queries[0].shape) # torch.Size([15, 384])
+        # print("paired_inds: ", paired_inds[0].shape) # torch.Size([15, 2])
+        # print("prior_scores: ", prior_scores[0].shape) # torch.Size([15, 2, 117])
+        # print("object_types: ", object_types[0].shape) # torch.Size([15])
+        # Compute keys/values for triplet decoder.
+        memory, mask = self.feature_head(dino_features)
+        # print("memory: ", memory.shape) # torch.Size([1, 25, 38, 256])
+        # print("mask: ", mask.shape) # torch.Size([1, 25, 38])
+        b, h, w, c = memory.shape
+        memory = memory.reshape(b, h * w, c)
+        kv_p_m = mask.reshape(-1, 1, h * w)
+        k_pos = self.kv_pe(NestedTensor(memory, mask)).permute(0, 2, 3, 1).reshape(b, h * w, 1, c)
+        # Enhance visual context with triplet decoder.
+        query_embeds = []
+        for i, (ho_q, mem) in enumerate(zip(ho_queries, memory)):
+            query_embeds.append(self.decoder(
+                ho_q.unsqueeze(1),              # (n, 1, q_dim)
+                mem.unsqueeze(1),               # (hw, 1, kv_dim)
+                kv_padding_mask=kv_p_m[i],      # (1, hw)
+                q_pos=positional_embeds[i],     # centre: (n, 1, 2*kv_dim), box: (n, 1, 4*kv_dim)
+                k_pos=k_pos[i]                  # (hw, 1, kv_dim)
+            ).squeeze(dim=2))
+        # Concatenate queries from all images in the same batch.
+        # print("query_embeds len: ", len(query_embeds)) # 1
+        query_embeds = torch.cat(query_embeds, dim=1)   # (ndec, \sigma{n}, q_dim)
+        # print("query_embeds: ", query_embeds.shape) # torch.Size([2, 15, 384])  2：# of decoder layers
+        logits = self.binary_classifier(query_embeds)
+        # print("logits: ", logits.shape) # torch.Size([2, 15, 117])
+        # print("targets: ", targets)
+        # if self.training:
+        #     labels = associate_with_ground_truth(
+        #         boxes, paired_inds, targets, self.num_category
+        #     )
+        #     print("labels: ", labels)
+        #     cls_loss = self.compute_classification_loss(logits, prior_scores, labels)
+        #     # loss_dict = dict(cls_loss=cls_loss)
+        #     return cls_loss
+
+        # detections = self.postprocessing(
+        #     boxes, paired_inds, object_types,
+        #     logits[-1], prior_scores, size
+        # )
+        
+        # for i, result in enumerate(detections):
+        #     print(f"Result {i+1}:")
+        #     for key, value in result.items():
+        #         if isinstance(value, torch.Tensor):
+        #             print(f"  Key: {key}, Shape: {value.shape}")
+        #         else:
+        #             print(f"  Key: {key}, Value: {value}")
+        #     print("-" * 50)
+        # Result 1:
+        # Key: boxes, Shape: torch.Size([6, 4])
+        # Key: pairing, Shape: torch.Size([138, 2])
+        # Key: scores, Shape: torch.Size([138])
+        # Key: labels, Shape: torch.Size([138])
+        # Key: objects, Shape: torch.Size([138])
+        # Key: size, Shape: torch.Size([2])
+        # Key: x, Shape: torch.Size([138])
+        final_output = self.convert_output(logits, paired_inds, object_types, additional_info)
+        return final_output 
 class HOIModel(nn.Module):
     def __init__(self, backbone, device, num_objects=None, feature_dim=768, person_category_id=1, patch_size=14, use_LN=True, iou_threshold = 0.0, topK = 15, positive_negative = False, num_heads=8, num_layers=1, dropout=0.1, denoised=True, position_encoding_type=None, use_attention=True, use_CLS=True, roi_size=7, use_self_attention=True, position_bbox = True, position_relative_bbox=True, position_bbox_dim=512):
         super(HOIModel, self).__init__()
@@ -36,12 +548,17 @@ class HOIModel(nn.Module):
         self.use_self_attention = use_self_attention
         self.position_relative_bbox = position_relative_bbox
         self.position_bbox = position_bbox
-        self.attention_pool = AttentionPool2d(
-            spacial_dim=roi_size,      # 7x7 spatial dimensions
-            embed_dim=feature_dim,      # embedding dimension (channels of input feature)
-            num_heads=num_heads,        # number of attention heads
-            output_dim=None     # output dimension, default to 768
-        )
+        self.ref_anchor_head = nn.Sequential(
+                nn.Linear(256, 256), nn.ReLU(),
+                nn.Linear(256, 2)
+            )
+        if self.position_bbox:
+            self.attention_pool = AttentionPool2d(
+                spacial_dim=roi_size,      # 7x7 spatial dimensions
+                embed_dim=feature_dim,      # embedding dimension (channels of input feature)
+                num_heads=num_heads,        # number of attention heads
+                output_dim=None     # output dimension, default to 768
+            )
         if self.position_relative_bbox:
             # Map spatial encodings to a specific dimension
             self.spatial_head = nn.Sequential(
@@ -176,6 +693,25 @@ class HOIModel(nn.Module):
         print("position_bbox_dim: ", position_bbox_dim)
         self.to(self.device)
 
+    def compute_box_pe(self, boxes, embeds, image_size):
+        bx_norm = boxes / image_size[[1, 0, 1, 0]]
+        bx_c = (bx_norm[:, :2] + bx_norm[:, 2:]) / 2
+        b_wh = bx_norm[:, 2:] - bx_norm[:, :2]
+
+        c_pe = compute_sinusoidal_pe(bx_c[:, None], 20).squeeze(1)
+        wh_pe = compute_sinusoidal_pe(b_wh[:, None], 20).squeeze(1)
+
+        box_pe = torch.cat([c_pe, wh_pe], dim=-1)
+
+        # Modulate the positional embeddings with box widths and heights by
+        # applying different temperatures to x and y
+        ref_hw_cond = self.ref_anchor_head(embeds).sigmoid()    # n_query, 2
+        # Note that the positional embeddings are stacked as [pe(y), pe(x)]
+        c_pe[..., :128] *= (ref_hw_cond[:, 1] / b_wh[:, 1]).unsqueeze(-1)
+        c_pe[..., 128:] *= (ref_hw_cond[:, 0] / b_wh[:, 0]).unsqueeze(-1)
+
+        return box_pe, c_pe
+    
     def separate_pooled_features(self, pooled_features, detection_counts):
         separated_features = []
         # separated_additional_info = []
@@ -261,7 +797,7 @@ class HOIModel(nn.Module):
             object_features = []
 
             for feat, det_info in zip(features, info):
-                print("feat size: ", feat.shape)
+                # print("feat size: ", feat.shape)
                 flattened_feat = feat.view(self.feature_dim, -1)  # [768, 49]
                 # if self.use_CLS:
                 #     flattened_feat = torch.cat([flattened_feat, CLS_token[i].unsqueeze(1)], dim=1)  # [768, 50]
@@ -454,67 +990,7 @@ class MultiBranchFusion(nn.Module):
             for fc_1, fc_2, fc_3
             in zip(self.fc_1, self.fc_2, self.fc_3)
         ]).sum(dim=0))
-        
-def compute_spatial_encodings(
-    boxes_1: List[Tensor], boxes_2: List[Tensor],
-    shapes: List[Tuple[int, int]], eps: float = 1e-10
-) -> Tensor:
-    """
-    Parameters:
-    -----------
-    boxes_1: List[Tensor]
-        First set of bounding boxes (M, 4)
-    boxes_1: List[Tensor]
-        Second set of bounding boxes (M, 4)
-    shapes: List[Tuple[int, int]]
-        Image shapes, heights followed by widths
-    eps: float
-        A small constant used for numerical stability
 
-    Returns:
-    --------
-    Tensor
-        Computed spatial encodings between the boxes (N, 36)
-    """
-    features = []
-    for b1, b2, shape in zip(boxes_1, boxes_2, shapes):
-        h, w = shape
-
-        c1_x = (b1[:, 0] + b1[:, 2]) / 2; c1_y = (b1[:, 1] + b1[:, 3]) / 2
-        c2_x = (b2[:, 0] + b2[:, 2]) / 2; c2_y = (b2[:, 1] + b2[:, 3]) / 2
-
-        b1_w = b1[:, 2] - b1[:, 0]; b1_h = b1[:, 3] - b1[:, 1]
-        b2_w = b2[:, 2] - b2[:, 0]; b2_h = b2[:, 3] - b2[:, 1]
-
-        d_x = torch.abs(c2_x - c1_x) / (b1_w + eps)
-        d_y = torch.abs(c2_y - c1_y) / (b1_h + eps)
-
-        iou = torch.diag(box_ops.box_iou(b1, b2))
-
-        # Construct spatial encoding
-        f = torch.stack([
-            # Relative position of box centre
-            c1_x / w, c1_y / h, c2_x / w, c2_y / h,
-            # Relative box width and height
-            b1_w / w, b1_h / h, b2_w / w, b2_h / h,
-            # Relative box area
-            b1_w * b1_h / (h * w), b2_w * b2_h / (h * w),
-            b2_w * b2_h / (b1_w * b1_h + eps),
-            # Box aspect ratio
-            b1_w / (b1_h + eps), b2_w / (b2_h + eps),
-            # Intersection over union
-            iou,
-            # Relative distance and direction of the object w.r.t. the person
-            (c2_x > c1_x).float() * d_x,
-            (c2_x < c1_x).float() * d_x,
-            (c2_y > c1_y).float() * d_y,
-            (c2_y < c1_y).float() * d_y,
-        ], 1)
-
-        features.append(
-            torch.cat([f, torch.log(f + eps)], 1)
-        )
-    return torch.cat(features)
 
 class AttentionPool2d(nn.Module):
     def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
@@ -878,3 +1354,175 @@ class CriterionHOI(nn.Module):
         """ 计算二元交叉熵损失 """
         return F.binary_cross_entropy_with_logits(inputs, targets, reduction='mean')
 
+class CriterionPVic(nn.Module):
+    def __init__(self, matcher, device, alpha=0.25, gamma=2.0, loss_type='focal', add_negative_category=False, positive_negative=False, negative_sample_num = 10):
+        super().__init__()
+        self.matcher = matcher
+        self.device = device
+        self.alpha = alpha
+        self.gamma = gamma
+        self.loss_type = loss_type
+        self.negative_sample_num = negative_sample_num
+        print("negative_sample_num: ", negative_sample_num)
+        print("loss type: ", self.loss_type)
+        print("self.alpha: ", self.alpha)
+        print("self.gamma: ", self.gamma)
+        # 初始化不匹配计数器
+        self.subject_label_mismatch = 0
+        self.object_label_mismatch = 0
+        self.subject_box_mismatch = 0
+        self.object_box_mismatch = 0
+        self.total_pairs = 0
+        self.add_negative_category = add_negative_category
+        self.num_category = 117
+        self.positive_negative = positive_negative
+    def forward(self, outputs, targets):
+        """
+        计算模型输出与目标之间的Focal Loss。
+        Args:
+            outputs (list): 模型输出的列表，每个元素包含该图像的所有人物-物体对的预测。
+            targets (list): 目标列表，每个元素包含该图像的真实标签信息。
+        
+        Returns:
+            torch.Tensor: 该批次的平均Focal Loss。
+        """
+        # 使用匹配器找到最优匹配
+        matched_indices = self.matcher(outputs, targets)
+        # print("matched_indices: ", matched_indices)
+        relation_loss = torch.tensor(0.0, device=self.device)
+        binary_loss= torch.tensor(0.0, device=self.device)
+        num_processed = 0  # 记录参与损失计算的图像数
+        # print("len(outputs)", len(outputs))
+        # print("len(targets)", len(targets))
+        
+        matched_pred_verb_scores = []
+        matched_pred_binary_scores = []
+        matched_tgt_verb_labels = []
+        matched_binary_labels = []
+        for idx, (pred, tgt) in enumerate(zip(outputs, targets)):
+            if len(pred) == 0:
+                # 如果当前图像没有预测结果，跳过此图像的损失计算
+                continue
+            # print("pred: ", pred)
+            # print("tgt: ", tgt)
+            sub_inds, obj_inds = matched_indices[idx]
+            if len(sub_inds) == 0 or len(obj_inds) == 0:
+                # 如果没有有效匹配，也跳过此图像
+                continue
+
+            for sub_idx, obj_idx in zip(sub_inds, obj_inds):
+                # 收集所有匹配对的预测logits和目标labels
+                # print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                matched_pred_verb_scores.append(pred[sub_idx]['relation_score'])
+                if self.positive_negative:
+                    matched_pred_binary_scores.append(pred[sub_idx]['binary_score'])
+                # 使用 [1, 0] 作为正类标签
+                matched_binary_labels.append(torch.tensor([1, 0], device=self.device).unsqueeze(0))
+                
+                matched_tgt_verb_labels.append(tgt['verb_labels'][obj_idx].unsqueeze(0))
+                # pred_subject = pred[sub_idx]
+
+                # tgt_subject = tgt['sub_labels'][obj_idx]
+                # tgt_object = tgt['obj_labels'][obj_idx]
+                # H, W = tgt['size']
+                # tgt_sub_boxes = box_cxcywh_to_xyxy(tgt['sub_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
+                # tgt_obj_boxes = box_cxcywh_to_xyxy(tgt['obj_boxes'][obj_idx]) * torch.tensor([W, H, W, H], device=self.device)
+                # self.total_pairs += 1
+                # try:
+                #     assert pred_subject['subject_category'] - 1 == tgt_subject.item(), f"Subject labels do not match: pred {pred_subject['subject_category']-1}, tgt {tgt_subject.item()}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.subject_label_mismatch += 1
+                # try:
+                #     assert pred_subject['object_category'] - 1 == tgt_object.item(), f"Object labels do not match: pred {pred_subject['object_category']}, tgt {tgt_object.item()}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.object_label_mismatch += 1
+                # try:
+                #     assert torch.allclose(torch.tensor(pred_subject['subject_bbox'], device=self.device), tgt_sub_boxes), f"Subject boxes do not match: pred {pred_subject['subject_bbox']}, tgt {tgt_sub_boxes}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.subject_box_mismatch += 1
+                # try:
+                #     assert torch.allclose(torch.tensor(pred_subject['object_bbox'], device=self.device), tgt_obj_boxes), f"Object boxes do not match: pred {pred_subject['object_bbox']}, tgt {tgt_obj_boxes}"
+                # except AssertionError as e:
+                #     print(f"AssertionError: {e}")
+                #     print(f"sub_idx: {sub_idx}, obj_idx: {obj_idx}")
+                #     print(tgt['filename'])
+                #     self.object_box_mismatch += 1
+            if self.add_negative_category:
+                unmatched_pred_verb_scores = []
+                unmatched_pred_scores = []  # 用于保存 pred[i]['subject_score'] 和 pred[i]['object_score'] 的乘积
+                for i in range(len(pred)):
+                    if i not in sub_inds:
+                        unmatched_pred_verb_scores.append(pred[i]['relation_score'])
+                        unmatched_pred_scores.append(pred[i]['subject_score'] * pred[i]['object_score'])
+
+                if unmatched_pred_verb_scores:
+                    if len(unmatched_pred_verb_scores) > self.negative_sample_num:
+                        top_indices = sorted(range(len(unmatched_pred_scores)), key=lambda i: unmatched_pred_scores[i], reverse=True)[:10]
+                        # 筛选出对应的 unmatched_pred_verb_scores
+                        unmatched_pred_verb_scores = [unmatched_pred_verb_scores[i] for i in top_indices]
+                    matched_pred_verb_scores += unmatched_pred_verb_scores
+                    negative_labels = torch.zeros((len(unmatched_pred_verb_scores), self.num_category), device=self.device)
+                    negative_labels[:, 57] = 1  # 将标签设置为第57类, no_interaction
+                    matched_tgt_verb_labels += [negative_labels]
+
+            if self.positive_negative:
+                unmatched_pred_binary_scores = []
+                for i in range(len(pred)):
+                    if i not in sub_inds:
+                        unmatched_pred_binary_scores.append(pred[i]['binary_score'])
+                # print("unmatched_pred_binary_scores len: ", len(unmatched_pred_binary_scores))
+                if unmatched_pred_binary_scores:
+                    matched_pred_binary_scores += unmatched_pred_binary_scores
+                    negative_labels = torch.tensor([[0, 1]] * len(unmatched_pred_binary_scores), device=self.device)
+                    matched_binary_labels.append(negative_labels)
+        if self.positive_negative and matched_pred_binary_scores:
+            matched_pred_binary_scores = torch.stack([tensor for tensor in matched_pred_binary_scores]).requires_grad_(True)
+            matched_binary_labels = torch.cat(matched_binary_labels, dim=0) #.requires_grad_(True)
+            if self.loss_type == 'focal':
+                binary_loss = self.focal_loss(matched_pred_binary_scores, matched_binary_labels.float())
+                # binary_loss = F.cross_entropy(matched_pred_binary_scores, matched_binary_labels.argmax(dim=1))
+                # print("matched_pred_binary_scores: ", matched_pred_binary_scores)
+                # print("matched_binary_labels: ", matched_binary_labels)
+                # binary_loss = self.bce_loss(matched_pred_binary_scores, matched_binary_labels.float()) 
+                # print("binary_loss: ", binary_loss)
+            elif self.loss_type == 'bce':
+                binary_loss = self.bce_loss(matched_pred_binary_scores, matched_binary_labels.float())      
+              
+        if matched_pred_verb_scores:
+            matched_pred_verb_scores = torch.stack([tensor for tensor in matched_pred_verb_scores]).requires_grad_(True)
+            matched_tgt_verb_labels = torch.cat(matched_tgt_verb_labels, dim=0) #.requires_grad_(True)
+
+            if self.loss_type == 'focal':
+                relation_loss = self.focal_loss(matched_pred_verb_scores, matched_tgt_verb_labels)
+                # print("relation_loss: ", relation_loss)
+            elif self.loss_type == 'bce':
+                relation_loss = self.bce_loss(matched_pred_verb_scores, matched_tgt_verb_labels)
+
+        return relation_loss, binary_loss
+
+    def focal_loss(self, inputs, targets):
+        """ 计算Focal Loss，用于处理类别不平衡问题 """
+        loss = sigmoid_focal_loss(inputs, targets, alpha=self.alpha, gamma=self.gamma, reduction='mean')
+        # print("focal_loss: ", loss)
+        return loss
+        # print("inputs: ", inputs)
+        # print("targets: ", targets)
+        # bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        # print("bce_loss: ", bce_loss)
+        # probas = torch.sigmoid(inputs)
+        # # print("probas: ", probas)
+        # loss = self.alpha * (1 - probas) ** self.gamma * bce_loss
+        # return loss.mean()
+    
+    def bce_loss(self, inputs, targets):
+        """ 计算二元交叉熵损失 """
+        return F.binary_cross_entropy_with_logits(inputs, targets, reduction='mean')

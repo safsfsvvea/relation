@@ -1,8 +1,8 @@
 from models.denoise_backbone import DenoisingVitBackbone
 from models.backbone import DINOv2Backbone
-from models.hoi import HOIModel, CriterionHOI, PostProcessHOI
+from models.hoi import HOIModel, PViC, CriterionHOI, PostProcessHOI
 from models.matcher import HungarianMatcherHOI_det
-from engine import train_one_epoch, evaluate_hoi, train_one_epoch_with_profiler, train_one_epoch_with_time, train_backbone_time, evaluate_hoi_single
+from engine import train_one_epoch, evaluate_hoi, evaluate_hoi_single
 import datasets
 from datasets.hico import CustomSubset
 import util.misc as utils
@@ -35,6 +35,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 def get_args_parser():
     parser = argparse.ArgumentParser('relation training and evaluation script', add_help=False)
+    parser.add_argument('--pvic', action='store_true', help='use pvic.')
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_detector', default=1e-5, type=float)
     parser.add_argument('--lr_backbone', default=0, type=float) #1e-5
@@ -500,6 +501,8 @@ def get_args_parser():
                         help = "The detection result file for HICO")
     parser.add_argument('--hico_det_file_test', type=str, 
                         help = "The detection result file for HICO test set")
+    parser.add_argument('--object_to_verb_file', type=str, 
+                        help = "The json file of valid verb for each object")
     parser.add_argument('--vg_rel_anno_file', type=str, 
                         help = "The annotation file for VG relation detection, used in the ConcatDataset mode.")
     parser.add_argument('--vg_keep_names_freq_file', type=str, 
@@ -563,7 +566,13 @@ def main(args):
     # print("detector: ", detector)
     
     # print(backbone)
-    model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention, position_bbox=args.position_bbox, position_relative_bbox=args.position_relative_bbox, position_bbox_dim=args.position_bbox_dim)
+    if args.object_to_verb_file:
+        with open(args.object_to_verb_file, 'r') as file:
+            args.object_to_verb = json.load(file)
+    if args.pvic:
+        model = PViC(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention, position_bbox=args.position_bbox, position_relative_bbox=args.position_relative_bbox, position_bbox_dim=args.position_bbox_dim, args=args)
+    else:
+        model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention, position_bbox=args.position_bbox, position_relative_bbox=args.position_relative_bbox, position_bbox_dim=args.position_bbox_dim)
     # model = DDP(model, find_unused_parameters=True)
     # model = backbone_time(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, add_negative_category=args.add_negative_category, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout)
     matcher = HungarianMatcherHOI_det(
@@ -727,20 +736,20 @@ def main(args):
     start_time = time.time()
     train_loss = 0
     for epoch in range(num_epochs):
-        try:
-            train_loss, relation_loss, binary_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, accelerator, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
-        except Exception as e:
-            print(f"Error encountered during training at epoch {epoch}: {e}")
-            state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
-            checkpoint_filename = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}_error.pth.tar")
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'state_dict': state_dict_to_save,
-                'optimizer': optimizer.state_dict(),
-                'loss': train_loss if 'train_loss' in locals() else None,
-            }, filename=checkpoint_filename)
-            print(f"Checkpoint saved due to error at {checkpoint_filename}")
-            break  # Optionally, stop training on error
+        # try:
+        train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, accelerator, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
+        # except Exception as e:
+        #     print(f"Error encountered during training at epoch {epoch}: {e}")
+        #     state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
+        #     checkpoint_filename = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}_error.pth.tar")
+        #     save_checkpoint({
+        #         'epoch': epoch + 1,
+        #         'state_dict': state_dict_to_save,
+        #         'optimizer': optimizer.state_dict(),
+        #         'loss': train_loss if 'train_loss' in locals() else None,
+        #     }, filename=checkpoint_filename)
+        #     print(f"Checkpoint saved due to error at {checkpoint_filename}")
+        #     break  # Optionally, stop training on error
         
         state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
         if args.output_dir and epoch % 100 == 0:
