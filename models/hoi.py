@@ -216,11 +216,7 @@ class PViC(nn.Module):
         self.num_category = 117
         self.denoised = denoised
         self.position_encoding = None
-        self.use_CLS = use_CLS
         self.roi_size= roi_size
-        self.use_self_attention = use_self_attention
-        self.position_relative_bbox = position_relative_bbox
-        self.position_bbox = position_bbox
         self.raw_lambda = raw_lambda
         self.alpha = args.alpha
         self.gamma = args.gamma
@@ -373,6 +369,7 @@ class PViC(nn.Module):
     def convert_output(self, logits, paired_inds, object_types, additional_info):
         output = []
         # print("len(paired_inds): ", len(paired_inds))
+        cumulative_pairs = 0
         for b in range(len(paired_inds)):
             batch_output = []
             if len(paired_inds[b]) == 0:  # 如果没有配对
@@ -386,7 +383,7 @@ class PViC(nn.Module):
                 object_bbox = additional_info[b]['boxes'][object_idx]
                 subject_score = additional_info[b]['scores'][subject_idx]
                 object_score = additional_info[b]['scores'][object_idx]
-                relation_score = logits[-1, i, :]  # 假设使用logits的平均值作为relation_score
+                relation_score = logits[-1, cumulative_pairs + i, :]
                 # print("object_idx: ", object_idx)
                 # print("object_types[b][object_idx]: ", object_types[b][object_idx])
                 entry = {
@@ -401,6 +398,7 @@ class PViC(nn.Module):
                 }
                 batch_output.append(entry)
             output.append(batch_output)
+            cumulative_pairs += len(paired_inds[b])
     
         return output
     def forward(self, nested_tensor: NestedTensor, rois_tensor, additional_info, detection_counts, size, targets=None):
@@ -436,6 +434,9 @@ class PViC(nn.Module):
         output_size = (self.roi_size, self.roi_size)
 
         rois_tensor = [tensor.to(self.device) for tensor in rois_tensor]
+        if all(roi.numel() == 0 for roi in rois_tensor):
+            print("No pairs found for this batch.")
+            return [[] for _ in range(batch_size)]  # Return a list of empty lists, one per image in batch
         pooled_features = roi_align(backbone_features, rois_tensor, output_size)
         # print("pooled_features shape: ", pooled_features.shape)
         pooled_features = self.attention_pool(pooled_features)
@@ -445,7 +446,7 @@ class PViC(nn.Module):
         # print("additional_info: ", additional_info)
         for info in additional_info:
             if not info:  # 如果 info 为空，则跳过当前循环
-                print("info is empty, skipping...")
+                # print("info is empty, skipping...")
                 continue  # 继续下一次循环
             # print("info: ", info)
             info['boxes'] = torch.tensor(info['boxes']).to(self.device)  
@@ -453,7 +454,7 @@ class PViC(nn.Module):
             info['labels'] = torch.tensor(info['labels']).to(self.device) - 1
         for i in range(len(additional_info)):
             if not additional_info[i]:
-                print("additional_info[i] is empty, skipping...")
+                # print("additional_info[i] is empty, skipping...")
                 continue  # 继续下一次循环
             additional_info[i]['embeds'] = separated_features[i]
         # boxes = [r['boxes'] for r in additional_info]
@@ -722,7 +723,10 @@ class HOIModel(nn.Module):
                 separated_features.append(pooled_features[current_idx:current_idx + count])
                 # separated_additional_info.append(additional_info[current_idx:current_idx + count])
             else:
-                separated_features.append(torch.empty(0, pooled_features.size(1), pooled_features.size(2), pooled_features.size(3)))
+                if self.position_bbox:
+                    separated_features.append(torch.empty(0, pooled_features.size(1)))
+                else:
+                    separated_features.append(torch.empty(0, pooled_features.size(1), pooled_features.size(2), pooled_features.size(3)))
                 # separated_additional_info.append([])
             current_idx += count
 
@@ -1190,6 +1194,7 @@ class CriterionHOI(nn.Module):
         self.gamma = gamma
         self.loss_type = loss_type
         self.negative_sample_num = negative_sample_num
+        print("add_negative_category: ", add_negative_category)
         print("negative_sample_num: ", negative_sample_num)
         print("loss type: ", self.loss_type)
         print("self.alpha: ", self.alpha)

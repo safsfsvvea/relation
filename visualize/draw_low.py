@@ -113,8 +113,8 @@ def load_and_visualize(json_file, output_dir_gt, output_dir_pred, dataset_dir, d
         visualize_pred(info, output_dir_pred, dataset_dir, draw_relation)
 
 # 使用示例
-json_file = '/bd_targaryen/users/clin/relation/results/no_gt/trainset_val/20/position_bbox/score_08_base_cross_attention_layer2_negative_sample_num_10/low_mAP_info.json'
-output_dir_gt = '/bd_byt4090i1/users/clin/relation/draws/no_gt/trainset_val/20/position_bbox/score_08_base_cross_attention_layer2_negative_sample_num_10/gt'
-output_dir_pred = '/bd_byt4090i1/users/clin/relation/draws/no_gt/trainset_val/20/position_bbox/score_08_base_cross_attention_layer2_negative_sample_num_10/pred'
+json_file = '/bd_targaryen/users/clin/relation/results/pvic/gt/40_60/no_add_negative_category/low_mAP_info.json'
+output_dir_gt = '/bd_byt4090i1/users/clin/relation/draws/pvic/gt/40_60/no_add_negative_category/gt'
+output_dir_pred = '/bd_byt4090i1/users/clin/relation/draws/pvic/gt/40_60/no_add_negative_category/pred'
 dataset_dir = '/bd_byt4090i1/users/clin/RLIPv2/hico_20160224_det/images/train2015'
 load_and_visualize(json_file, output_dir_gt, output_dir_pred, dataset_dir, draw_relation=True)

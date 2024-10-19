@@ -16,7 +16,7 @@ def visualize_gt_and_pred(info, output_dir):
     pred = info['prediction']
 
     filename = gt['filename']
-    image_path = os.path.join('/bd_byt4090i1/users/clin/RLIPv2/hico_20160224_det/images/test2015', filename)
+    image_path = os.path.join('/bd_byt4090i1/users/clin/RLIPv2/hico_20160224_det/images/train2015', filename)
     image = Image.open(image_path).convert('RGB')
     fig, ax = plt.subplots(1, figsize=(12, 9))
     ax.imshow(image)
@@ -59,9 +59,9 @@ def load_and_visualize(json_file, output_dir):
 
     for info in tqdm(data, desc="Processing images"):
         visualize_gt_and_pred(info, output_dir)
-        break
+        # break
 
 # Example usage
-json_file = '/bd_targaryen/users/clin/relation/results/test_single_64_nms/low_mAP_info.json'
-output_dir = '/bd_targaryen/users/clin/relation/results/test_single_64_nms/pred'
+json_file = '/bd_targaryen/users/clin/relation/results/pvic/gt/40_60/low_mAP_info.json'
+output_dir = '/bd_targaryen/users/clin/relation/results/pvic/gt/40_60/pred'
 load_and_visualize(json_file, output_dir)

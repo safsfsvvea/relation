@@ -570,7 +570,7 @@ def main(args):
         with open(args.object_to_verb_file, 'r') as file:
             args.object_to_verb = json.load(file)
     if args.pvic:
-        model = PViC(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention, position_bbox=args.position_bbox, position_relative_bbox=args.position_relative_bbox, position_bbox_dim=args.position_bbox_dim, args=args)
+        model = PViC(backbone, device=device, dropout=args.dropout, denoised=args.denoised, roi_size=args.roi_size, args=args)
     else:
         model = HOIModel(backbone, device=device, use_LN=args.use_LN, iou_threshold=args.iou_threshold, topK=args.topK, positive_negative=args.positive_negative, num_layers=args.attention_layers, dropout=args.dropout, denoised=args.denoised, position_encoding_type=args.position_encoding_type, use_attention=args.use_attention, use_CLS=args.use_CLS, roi_size=args.roi_size, use_self_attention=args.use_self_attention, position_bbox=args.position_bbox, position_relative_bbox=args.position_relative_bbox, position_bbox_dim=args.position_bbox_dim)
     # model = DDP(model, find_unused_parameters=True)
@@ -736,20 +736,20 @@ def main(args):
     start_time = time.time()
     train_loss = 0
     for epoch in range(num_epochs):
-        # try:
-        train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, accelerator, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
-        # except Exception as e:
-        #     print(f"Error encountered during training at epoch {epoch}: {e}")
-        #     state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
-        #     checkpoint_filename = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}_error.pth.tar")
-        #     save_checkpoint({
-        #         'epoch': epoch + 1,
-        #         'state_dict': state_dict_to_save,
-        #         'optimizer': optimizer.state_dict(),
-        #         'loss': train_loss if 'train_loss' in locals() else None,
-        #     }, filename=checkpoint_filename)
-        #     print(f"Checkpoint saved due to error at {checkpoint_filename}")
-        #     break  # Optionally, stop training on error
+        try:
+            train_loss = train_one_epoch(model, criterion, optimizer, data_loader_train, accelerator, device, epoch, lr_scheduler=lr_scheduler, accumulation_steps=args.accumulation_steps, grad_clip_val=args.clip_max_norm, tensorboard_writer=tensorboard_writer, args=args)
+        except Exception as e:
+            print(f"Error encountered during training at epoch {epoch}: {e}")
+            state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
+            checkpoint_filename = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch}_error.pth.tar")
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'state_dict': state_dict_to_save,
+                'optimizer': optimizer.state_dict(),
+                'loss': train_loss if 'train_loss' in locals() else None,
+            }, filename=checkpoint_filename)
+            print(f"Checkpoint saved due to error at {checkpoint_filename}")
+            break  # Optionally, stop training on error
         
         state_dict_to_save = model.state_dict() if train_backbone else {k: v for k, v in model.state_dict().items() if not k.startswith('backbone.')}
         if args.output_dir and epoch % 100 == 0:
@@ -781,7 +781,7 @@ def main(args):
         if epoch % 5 == 0 or epoch == num_epochs - 1:
             test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device, args, criterion=criterion)
             tensorboard_writer.add_scalar('Test/mAP', test_stats['mAP'], epoch)
-            
+            tensorboard_writer.add_scalar('Test/mean max recall', test_stats['mean max recall'], epoch)
             if test_stats['mAP'] > best_map:
                 best_map = test_stats['mAP']
                 best_map_model_filename = os.path.join(args.output_dir, "best_map_model.pth.tar")
